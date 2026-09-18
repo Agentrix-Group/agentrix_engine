@@ -27,6 +27,7 @@ use std::ops::{Deref, DerefMut};
 
 pub mod manifest;
 pub mod protocol;
+pub mod replay;
 pub mod runner;
 
 /// Inicializa `tracing` para escribir a **stderr**, nunca a stdout.
@@ -227,6 +228,17 @@ pub struct MatchResult {
     pub winner: Option<usize>,
 }
 
+/// Narración de lo que pasó en el tick actual -- Fase 5 (ATD-011), para
+/// el campo `events` de cada frame del replay. Quien orquesta la partida
+/// (`runner::run_match`) es responsable de vaciarlo antes de cada tick y
+/// de leerlo después; el motor solo empuja strings acá, nunca lo limpia
+/// solo. No es un evento por cada micro-cambio de física -- solo lo que
+/// un espectador humano querría ver narrado (disparo, impacto,
+/// destrucción, fin de partida), mismo criterio que "eventos
+/// destacados" de `06_ux_y_lenguaje_visual.md`.
+#[derive(Resource, Default, Clone, Debug)]
+pub struct TickEvents(pub Vec<String>);
+
 #[derive(Resource)]
 pub struct RngState(pub SmallRng);
 
@@ -256,6 +268,7 @@ pub fn build_app(settings: Settings) -> App {
         .insert_resource(Gravity(Vec2::ZERO))
         .insert_resource(RngState(SmallRng::seed_from_u64(settings.seed)))
         .init_resource::<MatchResult>()
+        .init_resource::<TickEvents>()
         .add_message::<FighterActionMessage>()
         .add_message::<FighterDestroyed>()
         .insert_resource(settings)
@@ -419,6 +432,7 @@ pub fn fighter_actions(
     )>,
     mut cmd: Commands,
     settings: Res<Settings>,
+    mut events: ResMut<TickEvents>,
 ) {
     for FighterActionMessage { action, entity } in actions.read() {
         let Ok((mut fighter, transform, mut vel, mut angular, mut force)) =
@@ -475,6 +489,7 @@ pub fn fighter_actions(
                 );
                 fighter.remaining_bullet_cooldown = fighter.bullet_cooldown as i32;
                 fighter.energy -= SHOOT_ENERGY_COST;
+                events.0.push(format!("P{} fired a bullet", fighter.player_id));
             }
         }
     }
@@ -521,14 +536,15 @@ fn expire_bullets(mut cmd: Commands, mut bullets: Query<(Entity, &mut Bullet)>) 
 #[allow(clippy::too_many_arguments)]
 fn detect_collisions(
     mut cmd: Commands,
-    mut events: MessageReader<CollisionStart>,
+    mut collisions: MessageReader<CollisionStart>,
     collision_type: Query<&CollisionType>,
     mut fighters: Query<&mut Fighter>,
     bullets: Query<&Bullet>,
     mut asteroids: Query<&mut Asteroid>,
     mut destroyed: MessageWriter<FighterDestroyed>,
+    mut events: ResMut<TickEvents>,
 ) {
-    for event in events.read() {
+    for event in collisions.read() {
         let (a, b) = (event.collider1, event.collider2);
         let (Ok(ta), Ok(tb)) = (collision_type.get(a), collision_type.get(b)) else {
             continue;
@@ -546,7 +562,9 @@ fn detect_collisions(
                     &mut fighters,
                     fighter_entity,
                     ASTEROID_DAMAGE,
+                    "an asteroid",
                     &mut destroyed,
+                    &mut events,
                 );
                 cmd.entity(asteroid_entity).despawn();
             }
@@ -572,19 +590,25 @@ fn detect_collisions(
                 } else {
                     (b, a)
                 };
+                let shooter = bullets.get(bullet_entity).ok().map(|b| b.player_id);
                 let same_owner = fighters
                     .get(fighter_entity)
                     .ok()
-                    .zip(bullets.get(bullet_entity).ok())
-                    .map(|(fighter, bullet)| fighter.player_id == bullet.player_id)
+                    .zip(shooter)
+                    .map(|(fighter, shooter_id)| fighter.player_id == shooter_id)
                     .unwrap_or(true);
                 if !same_owner {
+                    let source = shooter
+                        .map(|id| format!("P{id}'s bullet"))
+                        .unwrap_or_else(|| "a bullet".to_string());
                     take_hit(
                         &mut cmd,
                         &mut fighters,
                         fighter_entity,
                         BULLET_DAMAGE,
+                        &source,
                         &mut destroyed,
+                        &mut events,
                     );
                     cmd.entity(bullet_entity).despawn();
                 }
@@ -601,12 +625,15 @@ fn detect_collisions(
 /// Resta `damage` a la nave (reducido si tiene el escudo activo) y la
 /// destruye si su HP llega a cero. Mismo camino para cualquier
 /// `player_id` — no hay ninguna rama especial por slot acá.
+#[allow(clippy::too_many_arguments)]
 fn take_hit(
     cmd: &mut Commands,
     fighters: &mut Query<&mut Fighter>,
     entity: Entity,
     damage: f32,
+    source: &str,
     destroyed: &mut MessageWriter<FighterDestroyed>,
+    events: &mut TickEvents,
 ) {
     let Ok(mut fighter) = fighters.get_mut(entity) else {
         return;
@@ -617,7 +644,13 @@ fn take_hit(
         damage
     };
     fighter.health -= effective_damage;
+    let shielded_note = if fighter.shield_active { " (shielded)" } else { "" };
+    events.0.push(format!(
+        "P{} hit by {source} for {effective_damage:.1} dmg{shielded_note}",
+        fighter.player_id
+    ));
     if fighter.health <= 0.0 {
+        events.0.push(format!("P{} destroyed", fighter.player_id));
         destroyed.write(FighterDestroyed {
             entity,
             player_id: fighter.player_id,
@@ -629,7 +662,11 @@ fn take_hit(
 /// Fija `MatchResult` la primera vez que queda una nave viva (gana ese
 /// slot) o cero (empate por destrucción mutua). No decide nada por
 /// límite de ticks — eso es responsabilidad de quien corre la partida.
-fn check_match_end(mut result: ResMut<MatchResult>, fighters: Query<&Fighter>) {
+fn check_match_end(
+    mut result: ResMut<MatchResult>,
+    fighters: Query<&Fighter>,
+    mut events: ResMut<TickEvents>,
+) {
     if result.finished {
         return;
     }
@@ -637,6 +674,10 @@ fn check_match_end(mut result: ResMut<MatchResult>, fighters: Query<&Fighter>) {
     if alive.len() <= 1 {
         result.finished = true;
         result.winner = alive.first().copied();
+        match result.winner {
+            Some(pid) => events.0.push(format!("Match ended: P{pid} wins")),
+            None => events.0.push("Match ended in a draw (mutual destruction)".to_string()),
+        }
     }
 }
 

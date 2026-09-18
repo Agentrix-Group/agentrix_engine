@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MatchReplay",
+  "description": "Schema for deterministic match replays in Agentrix",
+  "type": "object",
+  "properties": {
+    "game_id": {
+      "type": "string"
+    },
+    "match_id": {
+      "type": "string"
+    },
+    "seed": {
+      "type": "integer"
+    },
+    "players": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "max_ticks": {
+      "type": "integer"
+    },
+    "winner": {
+      "type": "string"
+    },
+    "scores": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer"
+      }
+    },
+    "frames": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "tick": {
+            "type": "integer"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "state": {
+            "type": "object"
+          },
+          "actions": {
+            "type": "object"
+          }
+        },
+        "required": ["tick", "state"]
+      }
+    }
+  },
+  "required": ["game_id", "match_id", "players", "frames", "scores"]
+}

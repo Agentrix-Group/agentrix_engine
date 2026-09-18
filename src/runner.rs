@@ -14,15 +14,17 @@
 //! nueva (principio de "pocas dependencias operativas" del blueprint).
 
 use crate::manifest::GameManifest;
-use crate::protocol::{BotMessage, RunnerMessage, PROTOCOL_VERSION};
+use crate::protocol::{BotMessage, RunnerMessage, WireAction, PROTOCOL_VERSION};
+use crate::replay::{BulletState, FighterState, FrameState, ReplayFrame, ReplaySealer};
 use crate::{
     build_app, build_perception, collect_bullet_snapshots, collect_fighter_snapshots, Bullet,
     Fighter, FighterAction, FighterActionMessage, MatchResult, Settings, Shield, Shoot, Thrust,
-    Turn,
+    TickEvents, Turn,
 };
 use avian2d::prelude::LinearVelocity;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -189,18 +191,7 @@ pub fn run_match(config: MatchConfig) -> MatchOutcome {
         }
     };
 
-    if config.output_replay.is_some() {
-        // ATD-011 (replay autoritativo por eventos sellados con
-        // checksum/digest) es Fase 5. Se acepta el flag por forma, para
-        // que la CLI ya tenga la interfaz que Fase 5 va a necesitar,
-        // pero escribir un archivo acá invadiría esa fase y produciría
-        // un formato parcial que después habría que rehacer. Se
-        // documenta la ausencia en vez de fingir que ya existe.
-        tracing::warn!(
-            target: "platform",
-            "--output-replay fue pasado pero grabar el replay es Fase 5 (ATD-011): no se escribe ningún archivo todavía"
-        );
-    }
+    let mut sealer = ReplaySealer::new(&config.match_id, config.seed);
 
     let players = config.scripts.len() as u32;
     let radar_range = manifest.setting_f32("radar_range").unwrap_or(800.0);
@@ -329,6 +320,7 @@ pub fn run_match(config: MatchConfig) -> MatchOutcome {
             .expect("run_system_once no debería fallar leyendo balas");
 
         let mut actions_this_tick: Vec<(Entity, FighterAction)> = Vec::new();
+        let mut frame_actions: BTreeMap<String, WireAction> = BTreeMap::new();
 
         for (player_id, bot) in bots.iter_mut().enumerate() {
             let Some(perception) = build_perception(tick, player_id, radar_range, &fighters, &bullets)
@@ -380,6 +372,7 @@ pub fn run_match(config: MatchConfig) -> MatchOutcome {
                 }
             };
 
+            frame_actions.insert(player_id.to_string(), WireAction::from(action));
             actions_this_tick.push((entities[player_id], action));
         }
 
@@ -388,7 +381,33 @@ pub fn run_match(config: MatchConfig) -> MatchOutcome {
                 .write_message(FighterActionMessage { action, entity });
         }
 
+        app.world_mut().resource_mut::<TickEvents>().0.clear();
         app.update();
+        let tick_events = app.world().resource::<TickEvents>().0.clone();
+
+        let post_fighters = app
+            .world_mut()
+            .run_system_once(|q: Query<(&Fighter, &Transform, &LinearVelocity)>| {
+                collect_fighter_snapshots(&q)
+            })
+            .expect("run_system_once no debería fallar leyendo naves");
+        let post_bullets = app
+            .world_mut()
+            .run_system_once(|q: Query<(&Bullet, &Transform, &LinearVelocity)>| {
+                collect_bullet_snapshots(&q)
+            })
+            .expect("run_system_once no debería fallar leyendo balas");
+
+        sealer.push_frame(ReplayFrame {
+            tick,
+            events: tick_events,
+            state: FrameState {
+                fighters: post_fighters.iter().map(FighterState::from).collect(),
+                bullets: post_bullets.iter().map(BulletState::from).collect(),
+            },
+            actions: frame_actions,
+        });
+
         tick += 1;
     }
 
@@ -401,6 +420,43 @@ pub fn run_match(config: MatchConfig) -> MatchOutcome {
             reason: reason.clone(),
         });
         bot.disconnect("fin de partida");
+    }
+
+    if let Some(path) = &config.output_replay {
+        let player_labels: Vec<String> = (0..config.scripts.len()).map(|i| i.to_string()).collect();
+        // Placeholder, no una fórmula real (ver doc de
+        // `replay::MatchReplay::scores` -- `PE-005` sigue pendiente).
+        let scores: BTreeMap<String, i64> = player_labels
+            .iter()
+            .map(|label| {
+                let is_winner = final_winner.map(|w| w.to_string()) == Some(label.clone());
+                (label.clone(), if is_winner { 1 } else { 0 })
+            })
+            .collect();
+
+        let replay = sealer.seal(
+            manifest.id.clone(),
+            config.match_id.clone(),
+            config.seed,
+            player_labels,
+            max_ticks,
+            final_winner,
+            scores,
+        );
+
+        match serde_json::to_string_pretty(&replay) {
+            Ok(json) => match std::fs::write(path, json) {
+                Ok(()) => {
+                    tracing::info!(target: "platform", path = %path.display(), digest = %replay.digest, "replay sellado y escrito");
+                }
+                Err(e) => {
+                    tracing::error!(target: "platform", path = %path.display(), "no se pudo escribir el replay: {e}");
+                }
+            },
+            Err(e) => {
+                tracing::error!(target: "platform", "no se pudo serializar el replay a JSON: {e}");
+            }
+        }
     }
 
     MatchOutcome {

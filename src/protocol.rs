@@ -60,7 +60,7 @@ pub enum RunnerMessage {
 /// (`Thrust::On`, `Turn::Left`, ...). La conversión a `FighterAction` es
 /// explícita (`From<WireAction>`), nunca implícita, para que un cambio
 /// en el contrato o en el motor no se filtre en silencio al otro lado.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct WireAction {
     pub thrust: WireThrust,
     pub turn: WireTurn,
@@ -68,7 +68,7 @@ pub struct WireAction {
     pub shield: bool,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum WireThrust {
     #[serde(rename = "FORWARD")]
     Forward,
@@ -78,7 +78,7 @@ pub enum WireThrust {
     Brake,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum WireTurn {
     #[serde(rename = "LEFT")]
     Left,
@@ -106,6 +106,31 @@ impl From<WireAction> for FighterAction {
             },
             shoot: if wire.shoot { Shoot::On } else { Shoot::Off },
             shield: if wire.shield { Shield::On } else { Shield::Off },
+        }
+    }
+}
+
+/// Dirección inversa de `From<WireAction> for FighterAction`, agregada
+/// en Fase 5: el runner necesita registrar en el replay la acción
+/// efectivamente aplicada cada tick, sea que vino de un bot real o de
+/// `default_action()` (timeout/JSON inválido/proceso muerto) -- en
+/// ambos casos parte de un `FighterAction` interno, nunca de un
+/// `WireAction` ya disponible, así que hace falta poder ir para atrás.
+impl From<FighterAction> for WireAction {
+    fn from(action: FighterAction) -> Self {
+        WireAction {
+            thrust: match action.thrust {
+                Thrust::On => WireThrust::Forward,
+                Thrust::Off => WireThrust::Off,
+                Thrust::Stop => WireThrust::Brake,
+            },
+            turn: match action.turn {
+                Turn::Left => WireTurn::Left,
+                Turn::Right => WireTurn::Right,
+                Turn::None => WireTurn::Neutral,
+            },
+            shoot: matches!(action.shoot, Shoot::On),
+            shield: matches!(action.shield, Shield::On),
         }
     }
 }
@@ -169,6 +194,24 @@ mod tests {
         let bad = r#"{"type":"action","tick":1,"action":{"turn":"LEFT","shoot":true,"shield":false}}"#;
         let parsed: Result<BotMessage, _> = serde_json::from_str(bad);
         assert!(parsed.is_err(), "falta thrust, el parseo debe fallar");
+    }
+
+    #[test]
+    fn fighter_action_to_wire_action_round_trips() {
+        let action = FighterAction {
+            thrust: Thrust::Stop,
+            turn: Turn::Right,
+            shoot: Shoot::On,
+            shield: Shield::On,
+        };
+        let wire: WireAction = action.into();
+        let json = serde_json::to_string(&wire).expect("WireAction debe serializar");
+        assert_eq!(json, r#"{"thrust":"BRAKE","turn":"RIGHT","shoot":true,"shield":true}"#);
+        let back: FighterAction = wire.into();
+        assert_eq!(back.thrust, Thrust::Stop);
+        assert_eq!(back.turn, Turn::Right);
+        assert_eq!(back.shoot, Shoot::On);
+        assert_eq!(back.shield, Shield::On);
     }
 
     #[test]

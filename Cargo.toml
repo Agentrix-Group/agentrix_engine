@@ -26,3 +26,5 @@ avian2d = { version = "0.7.0", default-features = false, features = ["2d", "f32"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9.34"
+bincode = "1"
+sha2 = "0.10"

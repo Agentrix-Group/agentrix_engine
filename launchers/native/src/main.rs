@@ -50,10 +50,9 @@ struct Args {
     #[clap(long)]
     max_ticks: Option<u32>,
 
-    /// Aceptado por forma; la grabación real es Fase 5 (ATD-011,
-    /// replay autoritativo por eventos sellados). Ver
-    /// `bevy_starfighter::runner::run_match` para el detalle de por qué
-    /// no se escribe ningún archivo todavía en esta fase.
+    /// Ruta donde sellar y escribir el replay autoritativo (ATD-011,
+    /// Fase 5) al terminar la partida. Sin este flag no se graba nada
+    /// -- correr una partida no exige producir un replay.
     #[clap(long, value_parser)]
     output_replay: Option<PathBuf>,
 }
