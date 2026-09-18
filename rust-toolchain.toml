@@ -1,7 +1,10 @@
 [toolchain]
-channel = "1.65.0"
+# "stable" instead of a pinned version: bevy 0.19 / avian2d 0.7 (Fase 0 of
+# the Agentrix migration) need a far newer compiler than the 1.65.0 this
+# repo was pinned to since 2022 -- pinning to a specific new version would
+# just repeat the same staleness problem down the line.
+channel = "stable"
 targets = [
-    "wasm32-unknown-unknown",
     "x86_64-unknown-linux-gnu",
     "x86_64-apple-darwin",
     "x86_64-pc-windows-gnu"
