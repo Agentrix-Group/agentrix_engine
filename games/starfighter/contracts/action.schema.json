@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StarfighterAction",
+  "description": "Per-tick composite action for a starfighter ship (Agentrix, Decision 2.2). Unlike the platform-generic contracts/agent.schema.json (a single discrete action per tick, used by grid-based games like arena-basica), a starfighter ship can thrust, turn, shoot, and shield independently within the same tick -- combining them is the point of inertial 2D combat. Each game module declares its own action schema (08_arquitectura_tecnica.md, section 6, 'Contrato de un modulo de juego').",
+  "type": "object",
+  "properties": {
+    "thrust": {
+      "type": "string",
+      "enum": ["FORWARD", "OFF", "BRAKE"],
+      "description": "FORWARD applies acceleration in the ship's facing direction. OFF lets the ship coast under drag only. BRAKE applies active deceleration opposing current velocity. There is no reverse thrust in this version -- maps to the engine's internal Thrust::On/Off/Stop."
+    },
+    "turn": {
+      "type": "string",
+      "enum": ["LEFT", "RIGHT", "NONE"],
+      "description": "Angular acceleration direction applied this tick, clamped to the ship's max turn speed. Maps to the engine's internal Turn::Left/Right/None."
+    },
+    "shoot": {
+      "type": "boolean",
+      "description": "Fire a bullet if the ship's cooldown has elapsed and it has enough energy (see manifest settings.shoot_energy_cost)."
+    },
+    "shield": {
+      "type": "boolean",
+      "description": "Raise the energy shield for this tick. Reduces incoming bullet damage by settings.shield_damage_reduction while active, and drains settings.shield_energy_cost_per_tick from the ship's energy pool each tick it stays raised; the engine drops the shield automatically if energy runs out."
+    }
+  },
+  "required": ["thrust", "turn", "shoot", "shield"],
+  "additionalProperties": false
+}
