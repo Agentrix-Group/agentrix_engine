@@ -1,58 +1,25 @@
 [package]
 name = "bevy-starfighter"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2021"
 
 [workspace]
 members = [
-    "launchers/wasm",
     "launchers/native",
 ]
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 name = "bevy_starfighter"
 
 [[bin]]
-name="native-launcher"
-path="launchers/native/src/main.rs"
-
-[[bin]]
-name="benchmark"
-path="launchers/native/src/benchmark.rs"
-
-# Optimizations for WASM
-[profile.release]
-panic = 'abort'
-codegen-units = 1
-opt-level = 'z'
-lto = true
-debug = true
+name = "native-launcher"
+path = "launchers/native/src/main.rs"
 
 [dependencies]
-bevy = "0.9"
-image = "0.24.3"
-winit = "0.27"
 rand = { version = "0.8.5", features = ["small_rng"] }
-entity-gym-rs = { version = "0.8", features = ["bevy"] }
-# entity-gym-rs = { path = "../entity-gym-rs" }
-pyo3 = { version = "0.15", features = ["extension-module"], optional = true }
 clap = { version = "3.1.7", features = ["derive"] }
-ragged-buffer = "0.3.8"
-rogue-net = "0.4.1"
-bevy_rapier2d = { version = "0.19", features = ["debug-render"] }
-
-[profile.dev.package.rapier2d]
-opt-level = 3
-
-[profile.dev.package.entity-gym-rs]
-opt-level = 3
-
-[profile.dev.package.rogue-net]
-opt-level = 3
-
-[profile.dev.package.ragged-buffer]
-opt-level = 3
-
-[features]
-python = ["pyo3", "entity-gym-rs/python", "ragged-buffer/python"]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bevy = { version = "0.19", default-features = false }
+avian2d = { version = "0.7.0", default-features = false, features = ["2d", "f32", "parry-f32", "default-collider"] }
