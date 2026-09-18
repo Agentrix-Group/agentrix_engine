@@ -25,6 +25,7 @@ use rand::{Rng, SeedableRng};
 use serde::Serialize;
 use std::ops::{Deref, DerefMut};
 
+pub mod envelope_engine;
 pub mod manifest;
 pub mod protocol;
 pub mod replay;

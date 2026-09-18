@@ -36,7 +36,11 @@ use std::time::Duration;
 /// inválido, o su proceso ya murió: todo apagado, nunca dispara ni gasta
 /// energía. Es neutra a propósito -- ni castiga de más ni premia a quien
 /// no pudo responder, simplemente esa nave no actúa ese tick.
-fn default_action() -> FighterAction {
+///
+/// `pub` porque `envelope_engine` (protocolo motor↔Go) la reutiliza para
+/// el mismo caso (status != "valid" en un `PlayerActionInput") -- misma
+/// semántica de "esa nave no actúa este tick", no se reimplementa.
+pub fn default_action() -> FighterAction {
     FighterAction {
         thrust: Thrust::Off,
         turn: Turn::None,

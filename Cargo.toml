@@ -16,6 +16,10 @@ name = "bevy_starfighter"
 name = "native-launcher"
 path = "launchers/native/src/main.rs"
 
+[[bin]]
+name = "starfighter-engine"
+path = "launchers/native/src/engine_main.rs"
+
 [dependencies]
 rand = { version = "0.8.5", features = ["small_rng"] }
 clap = { version = "3.1.7", features = ["derive"] }

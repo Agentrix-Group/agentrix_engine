@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 workspace = "../.."
 
+[[bin]]
+name = "starfighter-engine"
+path = "src/engine_main.rs"
+
 [dependencies]
 bevy-starfighter = { package = "bevy-starfighter", path = "../.." }
 bevy = { version = "0.19", default-features = false }
