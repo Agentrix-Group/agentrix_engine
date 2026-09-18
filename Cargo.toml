@@ -25,3 +25,4 @@ bevy = { version = "0.19", default-features = false }
 avian2d = { version = "0.7.0", default-features = false, features = ["2d", "f32", "parry-f32", "default-collider"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9.34"

@@ -1,15 +1,21 @@
 //! Núcleo físico mínimo de starfighter sobre Avian2D + Bevy headless.
 //!
-//! Fase 0 (migración a Avian2D, sin `entity-gym-rs`/`pyo3`, CCD real) y
-//! Fase 1 (modelo de nave único: HP/energía/escudo, condición de fin de
-//! partida) de la migración a Agentrix. Todavía no implementa los
-//! contratos de Agentrix (manifest, esquema de acción propio, percepción
-//! aislada por slot) — eso es Fase 2 en adelante.
+//! Estado de la migración a Agentrix:
+//! - Fase 0: motor sobre Avian2D, sin `entity-gym-rs`/`pyo3`, CCD real.
+//! - Fase 1: modelo de nave único (HP/energía/escudo), condición de fin
+//!   de partida simétrica.
+//! - Fase 2: contratos (`games/starfighter/manifest.yaml`,
+//!   `contracts/action.schema.json`).
+//! - Fase 3: percepción aislada por slot (`Perception`, `RivalContact`
+//!   nunca expone energía/cooldown de un rival).
+//! - Fase 4 (`protocol`/`manifest`/`runner`): runner CLI real hablando
+//!   el protocolo de agente (ATD-007) por stdin/stdout con procesos de
+//!   bot externos.
 //!
 //! Valores de balance (HP, daño, costos de energía) son **placeholders**
 //! documentados en su lugar de definición: la afinación real es trabajo
-//! de un concurso real, no de esta fase. Lo que sí es un requisito de
-//! esta fase es que sean **iguales para todos los slots** — no hay
+//! de un concurso real, no de esta fase. Lo que sí es un requisito desde
+//! la Fase 1 es que sean **iguales para todos los slots** — no hay
 //! ninguna rama por `player_id` en todo este archivo.
 
 use avian2d::prelude::*;
@@ -18,6 +24,10 @@ use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use serde::Serialize;
 use std::ops::{Deref, DerefMut};
+
+pub mod manifest;
+pub mod protocol;
+pub mod runner;
 
 /// Inicializa `tracing` para escribir a **stderr**, nunca a stdout.
 /// stdout queda reservado para el protocolo de agente (ATD-007, Fase 4).

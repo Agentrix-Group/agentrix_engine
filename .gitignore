@@ -15,3 +15,7 @@
 
 wandb
 runs
+
+# Bytecode cache from running the Python test-fixture bots (Fase 4)
+__pycache__/
+*.py[cod]
