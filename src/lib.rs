@@ -1239,4 +1239,237 @@ mod tests {
             "la distancia relativa leída del ECS debería ser ~100, fue {dist}"
         );
     }
+
+    /// Fase 6: invariantes de física y reglas sobre entradas generadas al
+    /// azar dentro de rangos que el propio motor puede producir -- no
+    /// valores absurdos fuera de lo que un agente real podría causar.
+    ///
+    /// Nota sobre dos invariantes que el plan original sugería tal cual y
+    /// que **no** son ciertas literalmente en esta implementación, así
+    /// que se ajustaron (documentado acá, no en silencio):
+    ///
+    /// - "Una nave nunca queda con `health` negativa" -- `take_hit` resta
+    ///   el daño sin clamp; una nave puede quedar transitoriamente en
+    ///   negativo *antes* de despawnearse en el mismo llamado. Lo que sí
+    ///   es cierto, y lo que se prueba acá, es que una nave que **sobrevive**
+    ///   (sigue existiendo después de `take_hit`) nunca tiene
+    ///   `health <= 0.0` -- si el daño era letal, fue despawneada.
+    /// - "Una nave nunca termina fuera de los límites del arena" --
+    ///   `check_boundary_collision` no teletransporta la posición, solo
+    ///   invierte la componente de velocidad que apunta hacia afuera; la
+    ///   posición puede estar momentáneamente más allá del borde en el
+    ///   mismo tick en que se detecta. La propiedad real y verificable es
+    ///   que no *diverge*: tras varios ticks de física real con velocidad
+    ///   inicial hacia afuera, la nave se mantiene dentro de un margen
+    ///   razonable del arena, no se escapa indefinidamente.
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn spawn_one_fighter_app() -> (App, Entity) {
+            let settings = Settings {
+                players: 0,
+                asteroid_count: 0,
+                ..default()
+            };
+            let mut app = build_app(settings);
+            app.finish();
+            app.cleanup();
+            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::from_secs_f64(1.0 / 60.0),
+            ));
+            app.update(); // Startup, sin naves automáticas (players: 0)
+            let entity = spawn_fighter(&mut app.world_mut().commands(), 0, Vec2::ZERO);
+            app.world_mut().flush();
+            (app, entity)
+        }
+
+        fn fighter_action_strategy() -> impl Strategy<Value = FighterAction> {
+            (
+                prop_oneof![
+                    Just(Thrust::On),
+                    Just(Thrust::Off),
+                    Just(Thrust::Stop)
+                ],
+                prop_oneof![Just(Turn::Left), Just(Turn::Right), Just(Turn::None)],
+                any::<bool>(),
+                any::<bool>(),
+            )
+                .prop_map(|(thrust, turn, shoot, shield)| FighterAction {
+                    thrust,
+                    turn,
+                    shoot: if shoot { Shoot::On } else { Shoot::Off },
+                    shield: if shield { Shield::On } else { Shield::Off },
+                })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(128))]
+
+            /// Una nave que sobrevive a `take_hit` nunca queda con
+            /// `health <= 0.0` -- si el daño era letal, se despawneó (ver
+            /// nota de módulo sobre por qué esta es la forma correcta de
+            /// la propiedad, no "health nunca negativa" a secas).
+            #[test]
+            fn take_hit_never_leaves_a_survivor_with_nonpositive_health(
+                starting_health in 1.0f32..=200.0,
+                damage in 0.0f32..=250.0,
+            ) {
+                let (mut app, entity) = spawn_one_fighter_app();
+                if let Some(mut fighter) = app.world_mut().get_mut::<Fighter>(entity) {
+                    fighter.health = starting_health;
+                }
+                app.world_mut()
+                    .run_system_once(
+                        move |mut cmd: Commands,
+                              mut fighters: Query<&mut Fighter>,
+                              mut destroyed: MessageWriter<FighterDestroyed>,
+                              mut events: ResMut<TickEvents>| {
+                            take_hit(&mut cmd, &mut fighters, entity, damage, "proptest", &mut destroyed, &mut events);
+                        },
+                    )
+                    .expect("run_system_once no debería fallar");
+                app.world_mut().flush();
+
+                if let Some(fighter) = app.world().get::<Fighter>(entity) {
+                    prop_assert!(
+                        fighter.health > 0.0,
+                        "nave sobrevivió con health <= 0: {}",
+                        fighter.health
+                    );
+                }
+                // `None` (despawneada): el daño fue letal, comportamiento correcto.
+            }
+
+            /// Ninguna secuencia de acciones reales (procesadas por los
+            /// sistemas reales `fighter_actions`+`cooldowns`, no
+            /// reimplementados acá) deja `energy` negativa -- el disparo
+            /// exige `energy >= SHOOT_ENERGY_COST` antes de cobrarlo, y el
+            /// escudo se apaga solo cuando no alcanza para sostenerlo un
+            /// tick más (ver `cooldowns` en este mismo archivo).
+            #[test]
+            fn energy_never_goes_negative_across_random_action_sequences(
+                actions in prop::collection::vec(fighter_action_strategy(), 1..=30)
+            ) {
+                let (mut app, entity) = spawn_one_fighter_app();
+                for action in actions {
+                    app.world_mut()
+                        .write_message(FighterActionMessage { action, entity });
+                    app.update();
+                    let Some(fighter) = app.world().get::<Fighter>(entity) else {
+                        // Naves que no reciben daño en este test no deberían
+                        // despawnear nunca; si pasa, es una falla real.
+                        prop_assert!(false, "la nave desapareció sin haber recibido daño");
+                        break;
+                    };
+                    prop_assert!(
+                        fighter.energy >= 0.0 && fighter.energy <= fighter.max_energy,
+                        "energy fuera de [0, max_energy]: {}",
+                        fighter.energy
+                    );
+                }
+            }
+
+            /// Una nave con velocidad inicial hacia afuera del arena no
+            /// diverge tras varios ticks de física real -- la reflexión de
+            /// `check_boundary_collision` la mantiene dentro de un margen
+            /// razonable, no exacto (ver nota de módulo).
+            #[test]
+            fn boundary_reflection_prevents_runaway_divergence(
+                start_x in -50.0f32..=50.0,
+                start_y in -50.0f32..=50.0,
+                outward_speed in 100.0f32..=1500.0,
+                angle in 0.0f32..(std::f32::consts::PI * 2.0),
+            ) {
+                let (mut app, entity) = spawn_one_fighter_app();
+                {
+                    let mut transform = app.world_mut().get_mut::<Transform>(entity).unwrap();
+                    transform.translation.x = start_x;
+                    transform.translation.y = start_y;
+                }
+                {
+                    let mut velocity = app.world_mut().get_mut::<LinearVelocity>(entity).unwrap();
+                    velocity.0 = outward_speed * Vec2::new(angle.cos(), angle.sin());
+                }
+                for _ in 0..120 {
+                    app.update();
+                }
+                let transform = app.world().get::<Transform>(entity).unwrap();
+                let margin_x = ARENA_HALF_WIDTH * 1.5;
+                let margin_y = ARENA_HALF_HEIGHT * 1.5;
+                prop_assert!(
+                    transform.translation.x.abs() <= margin_x
+                        && transform.translation.y.abs() <= margin_y,
+                    "la nave divergió del arena: ({}, {})",
+                    transform.translation.x,
+                    transform.translation.y
+                );
+            }
+        }
+
+        // Generalización con propiedades del test puntual de tunneling de
+        // Fase 0 (`fast_bullet_does_not_tunnel_through_fighter`): en vez de
+        // un único valor fijo (3000 u/s), cualquier velocidad dentro del
+        // rango real del juego (1500-3000, el `bullet_speed` original era
+        // 1500-2500) que efectivamente cruza la nave produce colisión.
+        // Separado del bloque `proptest!` de arriba porque necesita menos
+        // casos (cada uno corre física de verdad, no es gratis) -- un
+        // `ProptestConfig` propio en vez de heredar el de 128 casos.
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(20))]
+
+            #[test]
+            fn bullet_within_real_speed_range_never_tunnels(
+                bullet_speed in 1500.0f32..=3000.0,
+            ) {
+                let settings = Settings {
+                    asteroid_count: 0,
+                    players: 0,
+                    continuous_collision_detection: true,
+                    ..default()
+                };
+                let mut app = build_app(settings);
+                app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                    Duration::from_secs_f64(1.0 / 60.0),
+                ));
+                app.finish();
+                app.cleanup();
+                app.update(); // Startup
+
+                let target =
+                    spawn_fighter(&mut app.world_mut().commands(), 0, Vec2::new(500.0, 0.0));
+                app.world_mut().flush();
+
+                let bullet_settings = app.world().resource::<Settings>().clone();
+                spawn_bullet(
+                    &mut app.world_mut().commands(),
+                    &bullet_settings,
+                    Vec2::new(0.0, 2.0),
+                    Vec2::new(bullet_speed, 0.0),
+                    600,
+                    1,
+                );
+                app.world_mut().flush();
+
+                let mut collided = false;
+                for _ in 0..30 {
+                    app.update();
+                    let has_event = app
+                        .world()
+                        .get_resource::<Messages<CollisionStart>>()
+                        .map(|m| !m.is_empty())
+                        .unwrap_or(false);
+                    let target_gone = app.world().get_entity(target).is_err();
+                    if has_event || target_gone {
+                        collided = true;
+                        break;
+                    }
+                }
+                prop_assert!(
+                    collided,
+                    "una bala a {bullet_speed} u/s (dentro del rango real del juego) atravesó la nave sin colisionar"
+                );
+            }
+        }
+    }
 }
