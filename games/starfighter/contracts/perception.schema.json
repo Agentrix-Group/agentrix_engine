@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StarfighterPerception",
+  "description": "Per-tick, per-slot perception snapshot for starfighter (Agentrix, Decision 2.3 / RF-042 / CA-013). One instance of this is what a single agent process receives for a single tick -- it never sees another slot's perception. `myself` exposes complete internal state (including energy and weapon cooldown); `rivals` intentionally does NOT include those two fields at all, not as null -- an agent can never read a rival's energy or cooldown, only what a radar contact could plausibly show (position, velocity, orientation, visible health, whether a shield is visibly raised). Rivals and bullets farther than the category's configured radar_range (see manifest.yaml settings.radar_range) are omitted from the arrays entirely, not included with empty data.",
+  "$defs": {
+    "vec2": {
+      "type": "object",
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      },
+      "required": ["x", "y"],
+      "additionalProperties": false
+    },
+    "self_state": {
+      "type": "object",
+      "description": "Complete own-ship state. Everything here is information the ship's own agent is always allowed to know about itself.",
+      "properties": {
+        "position": { "$ref": "#/$defs/vec2" },
+        "velocity": { "$ref": "#/$defs/vec2" },
+        "facing": { "$ref": "#/$defs/vec2", "description": "Unit vector of the ship's current facing direction." },
+        "health": { "type": "number" },
+        "energy": { "type": "number" },
+        "shield_active": { "type": "boolean" },
+        "remaining_bullet_cooldown": { "type": "integer" }
+      },
+      "required": ["position", "velocity", "facing", "health", "energy", "shield_active", "remaining_bullet_cooldown"],
+      "additionalProperties": false
+    },
+    "rival_contact": {
+      "type": "object",
+      "description": "What a slot can see of a rival ship within radar_range. Deliberately excludes energy and remaining_bullet_cooldown -- those are private to the rival's own agent process. additionalProperties is false specifically so that accidentally adding one of those fields later would break contract validation instead of silently leaking data.",
+      "properties": {
+        "player_id": { "type": "integer", "minimum": 0 },
+        "relative_position": { "$ref": "#/$defs/vec2", "description": "Rival position minus own position (radar-style bearing/range, not world-absolute coordinates)." },
+        "relative_velocity": { "$ref": "#/$defs/vec2" },
+        "facing": { "$ref": "#/$defs/vec2" },
+        "health": { "type": "number", "description": "Visible health, e.g. as a health bar would show it in the live view." },
+        "shield_active": { "type": "boolean", "description": "Whether the rival's shield is visibly raised -- a visual/physical fact, not internal state." }
+      },
+      "required": ["player_id", "relative_position", "relative_velocity", "facing", "health", "shield_active"],
+      "additionalProperties": false
+    },
+    "bullet_contact": {
+      "type": "object",
+      "properties": {
+        "player_id": { "type": "integer", "minimum": 0, "description": "Owner of the bullet -- lets the agent tell its own bullets apart from threats." },
+        "relative_position": { "$ref": "#/$defs/vec2" },
+        "relative_velocity": { "$ref": "#/$defs/vec2" }
+      },
+      "required": ["player_id", "relative_position", "relative_velocity"],
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {
+    "tick": { "type": "integer", "minimum": 0 },
+    "player_id": { "type": "integer", "minimum": 0 },
+    "myself": { "$ref": "#/$defs/self_state" },
+    "rivals": { "type": "array", "items": { "$ref": "#/$defs/rival_contact" } },
+    "bullets": { "type": "array", "items": { "$ref": "#/$defs/bullet_contact" } }
+  },
+  "required": ["tick", "player_id", "myself", "rivals", "bullets"],
+  "additionalProperties": false
+}

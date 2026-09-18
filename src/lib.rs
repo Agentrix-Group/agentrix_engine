@@ -16,6 +16,7 @@ use avian2d::prelude::*;
 use bevy::prelude::*;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
+use serde::Serialize;
 use std::ops::{Deref, DerefMut};
 
 /// Inicializa `tracing` para escribir a **stderr**, nunca a stdout.
@@ -34,6 +35,12 @@ pub struct Settings {
     pub players: u32,
     pub asteroid_count: u32,
     pub continuous_collision_detection: bool,
+    /// Distancia máxima a la que un slot puede ver naves y balas
+    /// rivales (Decisión 2.3). Hoy está sincronizado a mano con
+    /// `games/starfighter/manifest.yaml` (`settings.radar_range`) --
+    /// recién en Fase 4 el runner va a leer el manifest real y construir
+    /// `Settings` desde ahí, no antes.
+    pub radar_range: f32,
 }
 
 impl Default for Settings {
@@ -44,6 +51,7 @@ impl Default for Settings {
             players: 2,
             asteroid_count: 5,
             continuous_collision_detection: true,
+            radar_range: 800.0,
         }
     }
 }
@@ -622,9 +630,207 @@ fn check_match_end(mut result: ResMut<MatchResult>, fighters: Query<&Fighter>) {
     }
 }
 
+// ---------------------------------------------------------------------
+// Percepción aislada por slot (Fase 3).
+//
+// No existe ningún sistema de percepción heredado de fases anteriores:
+// el `ai()`/`Obs` original de `entity-gym-rs` se borró completo en la
+// Fase 0 junto con toda la maquinaria de RL. Esto se construye desde
+// cero, con la garantía real de RF-042/CA-013: un agente nunca puede
+// leer energía ni cooldown de un rival, porque `RivalContact` no tiene
+// esos campos -- no es que se serialicen ocultos o en null, el tipo
+// directamente no los declara. Serialization con `serde` porque el
+// contrato de percepción es JSON (mismo criterio que
+// `games/starfighter/contracts/action.schema.json` de la Fase 2).
+//
+// Decisión de diseño: las posiciones/velocidades de rivales y balas son
+// **relativas a la nave propia** (`relative_position`/`relative_velocity`
+// = objetivo - propio), no absolutas en el mundo. Es la semántica natural
+// de un contacto de radar (rumbo y distancia desde uno mismo, no
+// coordenadas del mapa), evita que un agente tenga que restar su propia
+// posición en cada tick para algo tan básico como "¿hacia dónde está el
+// rival", y es lo que ya hacía el featurizer original de
+// `entity-gym-rs` (`reldx`/`reldy`) antes de que se borrara en Fase 0 --
+// no es una idea nueva, es preservar la única parte de ese diseño que
+// tenía sentido, ahora sin filtrar información interna del rival.
+// ---------------------------------------------------------------------
+
+/// Vector 2D serializable para el contrato de percepción. `bevy::Vec2`
+/// (reexport de `glam::Vec2`) no tiene `Serialize` habilitado en este
+/// crate (compilamos bevy con `default-features = false` y no activamos
+/// el feature `serde` de glam) -- este tipo local, explícito en el JSON
+/// de salida, es más claro para un contrato externo que depender de la
+/// representación interna de una librería de matemáticas de Rust.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct Vec2Data {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl From<Vec2> for Vec2Data {
+    fn from(v: Vec2) -> Self {
+        Vec2Data { x: v.x, y: v.y }
+    }
+}
+
+/// Estado propio **completo** -- todo lo que la propia nave puede ver de
+/// sí misma, incluida información interna (energía, cooldown) que nunca
+/// se expone de un rival.
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfState {
+    pub position: Vec2Data,
+    pub velocity: Vec2Data,
+    pub facing: Vec2Data,
+    pub health: f32,
+    pub energy: f32,
+    pub shield_active: bool,
+    pub remaining_bullet_cooldown: i32,
+}
+
+/// Lo que un slot puede ver de una nave rival. **No tiene** `energy` ni
+/// `remaining_bullet_cooldown` -- a diferencia de `SelfState`, no es que
+/// esos campos vengan en `null`, el tipo no los declara en absoluto.
+#[derive(Debug, Clone, Serialize)]
+pub struct RivalContact {
+    pub player_id: usize,
+    pub relative_position: Vec2Data,
+    pub relative_velocity: Vec2Data,
+    pub facing: Vec2Data,
+    pub health: f32,
+    pub shield_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BulletContact {
+    pub player_id: usize,
+    pub relative_position: Vec2Data,
+    pub relative_velocity: Vec2Data,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Perception {
+    pub tick: u64,
+    pub player_id: usize,
+    pub myself: SelfState,
+    pub rivals: Vec<RivalContact>,
+    pub bullets: Vec<BulletContact>,
+}
+
+/// Datos crudos de una nave leídos del ECS, antes de decidir qué es
+/// visible para quién. Separar esto de `build_perception` deja la lógica
+/// de "qué ve un slot" pura y testeable sin levantar una `App` de Bevy.
+#[derive(Debug, Clone, Copy)]
+pub struct FighterSnapshot {
+    pub player_id: usize,
+    pub position: Vec2,
+    pub velocity: Vec2,
+    pub facing: Vec2,
+    pub health: f32,
+    pub energy: f32,
+    pub shield_active: bool,
+    pub remaining_bullet_cooldown: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BulletSnapshot {
+    pub player_id: usize,
+    pub position: Vec2,
+    pub velocity: Vec2,
+}
+
+pub fn collect_fighter_snapshots(
+    fighters: &Query<(&Fighter, &Transform, &LinearVelocity)>,
+) -> Vec<FighterSnapshot> {
+    fighters
+        .iter()
+        .map(|(fighter, transform, velocity)| FighterSnapshot {
+            player_id: fighter.player_id,
+            position: transform.translation.truncate(),
+            velocity: velocity.0,
+            facing: facing_direction(transform),
+            health: fighter.health,
+            energy: fighter.energy,
+            shield_active: fighter.shield_active,
+            remaining_bullet_cooldown: fighter.remaining_bullet_cooldown,
+        })
+        .collect()
+}
+
+pub fn collect_bullet_snapshots(
+    bullets: &Query<(&Bullet, &Transform, &LinearVelocity)>,
+) -> Vec<BulletSnapshot> {
+    bullets
+        .iter()
+        .map(|(bullet, transform, velocity)| BulletSnapshot {
+            player_id: bullet.player_id,
+            position: transform.translation.truncate(),
+            velocity: velocity.0,
+        })
+        .collect()
+}
+
+/// Arma la percepción de un slot a partir de snapshots ya leídos del
+/// ECS: su propio estado completo, más naves y balas rivales dentro de
+/// `radar_range`. Fuera de rango un contacto directamente no aparece en
+/// el vector -- no se serializa vacío ni en null. `None` si `player_id`
+/// no corresponde a ninguna nave viva (una nave destruida no percibe
+/// nada; quien corre la partida decide qué hacer con eso).
+pub fn build_perception(
+    tick: u64,
+    player_id: usize,
+    radar_range: f32,
+    fighters: &[FighterSnapshot],
+    bullets: &[BulletSnapshot],
+) -> Option<Perception> {
+    let me = fighters.iter().find(|f| f.player_id == player_id)?;
+
+    let myself = SelfState {
+        position: me.position.into(),
+        velocity: me.velocity.into(),
+        facing: me.facing.into(),
+        health: me.health,
+        energy: me.energy,
+        shield_active: me.shield_active,
+        remaining_bullet_cooldown: me.remaining_bullet_cooldown,
+    };
+
+    let rivals = fighters
+        .iter()
+        .filter(|f| f.player_id != player_id)
+        .filter(|f| f.position.distance(me.position) <= radar_range)
+        .map(|f| RivalContact {
+            player_id: f.player_id,
+            relative_position: (f.position - me.position).into(),
+            relative_velocity: (f.velocity - me.velocity).into(),
+            facing: f.facing.into(),
+            health: f.health,
+            shield_active: f.shield_active,
+        })
+        .collect();
+
+    let bullets = bullets
+        .iter()
+        .filter(|b| b.position.distance(me.position) <= radar_range)
+        .map(|b| BulletContact {
+            player_id: b.player_id,
+            relative_position: (b.position - me.position).into(),
+            relative_velocity: (b.velocity - me.velocity).into(),
+        })
+        .collect();
+
+    Some(Perception {
+        tick,
+        player_id,
+        myself,
+        rivals,
+        bullets,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
     use std::time::Duration;
 
     /// Criterio de aceptación de la Fase 0: una bala a una velocidad
@@ -846,6 +1052,140 @@ mod tests {
             p0 * 100.0,
             margin * 100.0,
             decided
+        );
+    }
+
+    fn snapshot(player_id: usize, position: Vec2) -> FighterSnapshot {
+        FighterSnapshot {
+            player_id,
+            position,
+            velocity: Vec2::ZERO,
+            facing: Vec2::Y,
+            health: 100.0,
+            energy: 100.0,
+            shield_active: false,
+            remaining_bullet_cooldown: 0,
+        }
+    }
+
+    /// Criterio de aceptación 1 de la Fase 3: un rival fuera de
+    /// `radar_range` no aparece en absoluto en `rivals` (no se serializa
+    /// vacío/nulo, directamente no está en el vector); dentro de rango,
+    /// aparece exactamente un contacto.
+    #[test]
+    fn perception_range_isolation() {
+        let radar_range = 800.0;
+        let me = snapshot(0, Vec2::ZERO);
+
+        let far = snapshot(1, Vec2::new(radar_range + 1.0, 0.0));
+        let perception_far =
+            build_perception(0, 0, radar_range, &[me, far], &[]).expect("player 0 vive");
+        assert!(
+            perception_far.rivals.is_empty(),
+            "un rival a más de radar_range no debería aparecer en absoluto"
+        );
+
+        let near = snapshot(1, Vec2::new(radar_range - 1.0, 0.0));
+        let perception_near =
+            build_perception(0, 0, radar_range, &[me, near], &[]).expect("player 0 vive");
+        assert_eq!(
+            perception_near.rivals.len(),
+            1,
+            "un rival dentro de radar_range debe aparecer como exactamente un contacto"
+        );
+        assert_eq!(perception_near.rivals[0].player_id, 1);
+    }
+
+    /// Criterio de aceptación 2 de la Fase 3 -- el más importante, es la
+    /// garantía real de RF-042/CA-013. El tipo `RivalContact` ya impide
+    /// esto en tiempo de compilación (no tiene esos campos), pero lo que
+    /// de verdad importa es confirmar el JSON serializado real: si
+    /// alguien agregara esos campos a `RivalContact` en el futuro sin
+    /// darse cuenta del problema, este test los atraparía igual, a nivel
+    /// de dato serializado, no de tipo.
+    #[test]
+    fn perception_never_leaks_rival_internal_fields() {
+        let me = snapshot(0, Vec2::ZERO);
+        let mut rival = snapshot(1, Vec2::new(100.0, 0.0));
+        rival.energy = 42.0; // valor centinela: si esto se filtra, lo vemos en el JSON
+        rival.remaining_bullet_cooldown = 7;
+
+        let perception =
+            build_perception(0, 0, 800.0, &[me, rival], &[]).expect("player 0 vive");
+        assert_eq!(perception.rivals.len(), 1, "el rival debe estar dentro de rango");
+
+        let value = serde_json::to_value(&perception).expect("Perception debe serializar a JSON");
+        let rivals_json = value
+            .get("rivals")
+            .expect("la percepción debe tener el campo rivals")
+            .to_string();
+
+        assert!(
+            !rivals_json.contains("energy"),
+            "el bloque de rivales serializado no debe contener la clave `energy` en ningún lado: {rivals_json}"
+        );
+        assert!(
+            !rivals_json.contains("remaining_bullet_cooldown"),
+            "el bloque de rivales serializado no debe contener `remaining_bullet_cooldown`: {rivals_json}"
+        );
+        assert!(
+            !rivals_json.contains("42"),
+            "el valor centinela de energía del rival (42) no debe aparecer en el bloque de rivales: {rivals_json}"
+        );
+
+        // Control positivo: `myself` sí debe tener esos campos -- si este
+        // assert fallara, sería la prueba de que el test de arriba no
+        // está probando nada real (falso negativo por accidente de
+        // nombres de campo).
+        let myself_json = value
+            .get("myself")
+            .expect("la percepción debe tener el campo myself")
+            .to_string();
+        assert!(
+            myself_json.contains("energy") && myself_json.contains("remaining_bullet_cooldown"),
+            "myself sí debe exponer energía y cooldown propios: {myself_json}"
+        );
+    }
+
+    /// Confirma que la extracción real desde el ECS (`collect_fighter_snapshots`)
+    /// produce datos consistentes con lo que se spawneó -- no solo que la
+    /// lógica pura de `build_perception` sea correcta en aislamiento.
+    #[test]
+    fn perception_ecs_integration() {
+        let settings = Settings {
+            players: 0,
+            asteroid_count: 0,
+            ..default()
+        };
+        let mut app = build_app(settings);
+        app.finish();
+        app.cleanup();
+        app.update();
+
+        spawn_fighter(&mut app.world_mut().commands(), 0, Vec2::new(0.0, 0.0));
+        spawn_fighter(&mut app.world_mut().commands(), 1, Vec2::new(100.0, 0.0));
+        app.world_mut().flush();
+        app.update();
+
+        let fighters = app
+            .world_mut()
+            .run_system_once(
+                |q: Query<(&Fighter, &Transform, &LinearVelocity)>| collect_fighter_snapshots(&q),
+            )
+            .expect("run_system_once no debería fallar");
+        assert_eq!(fighters.len(), 2, "deben leerse las 2 naves spawneadas");
+
+        let perception =
+            build_perception(0, 0, 800.0, &fighters, &[]).expect("player 0 debe existir");
+        assert_eq!(perception.rivals.len(), 1);
+        assert_eq!(perception.rivals[0].player_id, 1);
+        // Distancia real ~100 (puede moverse levemente por un tick de física).
+        let dist = (perception.rivals[0].relative_position.x.powi(2)
+            + perception.rivals[0].relative_position.y.powi(2))
+        .sqrt();
+        assert!(
+            (dist - 100.0).abs() < 5.0,
+            "la distancia relativa leída del ECS debería ser ~100, fue {dist}"
         );
     }
 }
