@@ -42,24 +42,10 @@ fn bench_tick_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("tick_throughput");
 
     // 2 naves + 5 asteroides: la configuración por defecto de una
-    // partida 1v1 real (games/starfighter/manifest.yaml).
+    // partida 1v1 real de Starfighter.
     group.bench_function("2_fighters_5_asteroids", |b| {
         b.iter_batched(
             || build_ready_app(2),
-            |mut app| {
-                for _ in 0..100 {
-                    app.update();
-                }
-            },
-            criterion::BatchSize::LargeInput,
-        );
-    });
-
-    // 4 naves (el máximo de games/starfighter/manifest.yaml,
-    // max_players: 4): cota superior realista de carga por partida.
-    group.bench_function("4_fighters_5_asteroids", |b| {
-        b.iter_batched(
-            || build_ready_app(4),
             |mut app| {
                 for _ in 0..100 {
                     app.update();

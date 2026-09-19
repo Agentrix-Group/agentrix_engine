@@ -83,7 +83,10 @@ fn full_protocol_sequence_against_real_subprocess() {
     // 1. engine_ready, no pedido -- primer mensaje, sequence 1.
     let ready = engine.read_envelope();
     assert_eq!(ready["type"], "engine_ready");
-    assert_eq!(ready["payload"]["supportedProtocols"][0], "agentrix-engine/1");
+    assert_eq!(
+        ready["payload"]["supportedProtocols"][0],
+        "agentrix-engine/1"
+    );
 
     // 2. initialize_match con 2 jugadores.
     engine.write_envelope(
@@ -102,15 +105,43 @@ fn full_protocol_sequence_against_real_subprocess() {
     let initialized = engine.read_envelope();
     assert_eq!(initialized["type"], "match_initialized");
     let perceptions = &initialized["payload"]["perceptions"];
-    assert!(perceptions.get("p0").is_some(), "debe haber percepción para p0");
-    assert!(perceptions.get("p1").is_some(), "debe haber percepción para p1");
+    assert!(
+        perceptions.get("p0").is_some(),
+        "debe haber percepción para p0"
+    );
+    assert!(
+        perceptions.get("p1").is_some(),
+        "debe haber percepción para p1"
+    );
     let initial_hash = initialized["payload"]["stateHash"]
         .as_str()
         .unwrap()
         .to_string();
     assert_eq!(initial_hash.len(), 64, "stateHash debe ser SHA-256 en hex");
+    assert_eq!(initialized["payload"]["publicSnapshot"]["tick"], 0);
+    let public = &initialized["payload"]["publicSnapshot"];
+    assert_eq!(public["fighters"].as_array().unwrap().len(), 2);
+    assert!(public["bullets"].is_array());
+    assert!(public["events"].is_array());
+    assert_eq!(public["stateHash"], initialized["payload"]["stateHash"]);
+    for fighter in public["fighters"].as_array().unwrap() {
+        assert!(fighter["position"].is_object());
+        assert!(fighter["velocity"].is_object());
+        assert!(fighter["rotation"].is_number());
+        assert!(fighter["health"].is_number());
+        assert!(fighter["shieldActive"].is_boolean());
+    }
 
     let initial_p0_pos = perceptions["p0"]["myself"]["position"].clone();
+
+    // Un tick adelantado se rechaza; el motor conserva el tick esperado.
+    engine.write_envelope(
+        "test-match-1",
+        "advance_tick",
+        json!({"tick": 1, "actions": {}}),
+    );
+    let mismatch = engine.read_envelope();
+    assert_eq!(mismatch["type"], "engine_error");
 
     // 3. Varios advance_tick con acciones reales -- p0 avanza a fondo,
     //    p1 no hace nada. Confirma que el estado realmente avanza.
@@ -128,16 +159,15 @@ fn full_protocol_sequence_against_real_subprocess() {
             }),
         );
         let result = engine.read_envelope();
-        assert!(
-            result["type"] == "tick_completed" || result["type"] == "match_completed",
-            "advance_tick debe responder tick_completed o match_completed, no {}",
-            result["type"]
+        assert_eq!(result["type"], "tick_completed");
+        assert_eq!(result["payload"]["tick"], tick + 1);
+        assert_eq!(result["payload"]["publicSnapshot"]["tick"], tick + 1);
+        let new_hash = result["payload"]["stateHash"].as_str().unwrap().to_string();
+        assert_ne!(
+            new_hash, last_hash,
+            "el stateHash debe cambiar tick a tick (el estado avanza)"
         );
-        if result["type"] == "tick_completed" {
-            let new_hash = result["payload"]["stateHash"].as_str().unwrap().to_string();
-            assert_ne!(new_hash, last_hash, "el stateHash debe cambiar tick a tick (el estado avanza)");
-            last_hash = new_hash;
-        }
+        last_hash = new_hash;
     }
 
     // Una tanda más pidiendo la percepción para comparar posición.
@@ -148,18 +178,28 @@ fn full_protocol_sequence_against_real_subprocess() {
             "tick": 5,
             "actions": {
                 "p0": {"status": "valid", "payload": {"thrust": "FORWARD", "turn": "NONE", "shoot": false, "shield": false}},
-                "p1": {"status": "timeout"},
+                "p1": {"status": "disqualified", "errorDetails": "timeout"},
             }
         }),
     );
     let result = engine.read_envelope();
-    if result["type"] == "tick_completed" {
-        let p0_pos_now = &result["payload"]["perceptions"]["p0"]["myself"]["position"];
-        assert_ne!(
-            p0_pos_now, &initial_p0_pos,
-            "p0 empujó FORWARD 6 ticks, su posición debe haber cambiado"
-        );
-    }
+    assert_eq!(result["type"], "tick_completed");
+    assert_eq!(result["payload"]["tick"], 6);
+    assert_eq!(result["payload"]["isOver"], true);
+    assert_eq!(result["payload"]["winner"], "p0");
+    assert_eq!(result["payload"]["perceptions"]["p0"]["tick"], 6);
+    assert_eq!(result["payload"]["perceptions"]["p1"]["tick"], 6);
+    let p0_pos_now = &result["payload"]["publicSnapshot"]["fighters"][0]["position"];
+    assert_ne!(
+        p0_pos_now, &initial_p0_pos,
+        "p0 empujó FORWARD 6 ticks, su posición debe haber cambiado"
+    );
+
+    engine.write_envelope("test-match-1", "finish_match", json!({"reason": "timeout"}));
+    let completed = engine.read_envelope();
+    assert_eq!(completed["type"], "match_completed");
+    assert_eq!(completed["payload"]["reason"], "timeout");
+    assert_eq!(completed["payload"]["finalTick"], 6);
 
     // 4. shutdown -> shutdown_ack, proceso termina limpio.
     engine.write_envelope("test-match-1", "shutdown", json!({"reason": "test done"}));
@@ -170,5 +210,8 @@ fn full_protocol_sequence_against_real_subprocess() {
         .child
         .wait()
         .expect("el proceso debería terminar después de shutdown_ack");
-    assert!(status.success(), "el motor debería salir con código 0 tras shutdown");
+    assert!(
+        status.success(),
+        "el motor debería salir con código 0 tras shutdown"
+    );
 }

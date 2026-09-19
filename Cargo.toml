@@ -3,18 +3,9 @@ name = "bevy-starfighter"
 version = "0.3.0"
 edition = "2021"
 
-[workspace]
-members = [
-    "launchers/native",
-]
-
 [lib]
 crate-type = ["rlib"]
 name = "bevy_starfighter"
-
-[[bin]]
-name = "native-launcher"
-path = "launchers/native/src/main.rs"
 
 [[bin]]
 name = "starfighter-engine"
@@ -22,15 +13,12 @@ path = "launchers/native/src/engine_main.rs"
 
 [dependencies]
 rand = { version = "0.8.5", features = ["small_rng"] }
-clap = { version = "3.1.7", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bevy = { version = "0.19", default-features = false }
 avian2d = { version = "0.7.0", default-features = false, features = ["2d", "f32", "parry-f32", "default-collider"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9.34"
-bincode = "1"
 sha2 = "0.10"
 
 [dev-dependencies]

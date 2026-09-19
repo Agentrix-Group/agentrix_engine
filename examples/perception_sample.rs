@@ -1,11 +1,12 @@
 //! Imprime una instancia de ejemplo de `Perception` en JSON por stdout.
 //!
 //! Sirve como muestra real (no un ejemplo escrito a mano en un schema)
-//! para validar `games/starfighter/contracts/perception.schema.json`:
+//! para validar el contrato `games/starfighter/contracts/perception.schema.json`
+//! del repositorio Agentrix:
 //!
 //! ```text
 //! cargo run --example perception_sample | \
-//!   uvx check-jsonschema --schemafile games/starfighter/contracts/perception.schema.json -
+//!   uvx check-jsonschema --schemafile ../Agentrix/games/starfighter/contracts/perception.schema.json -
 //! ```
 use bevy::math::Vec2;
 use bevy_starfighter::{build_perception, BulletSnapshot, FighterSnapshot};

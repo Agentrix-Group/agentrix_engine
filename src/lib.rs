@@ -4,13 +4,11 @@
 //! - Fase 0: motor sobre Avian2D, sin `entity-gym-rs`/`pyo3`, CCD real.
 //! - Fase 1: modelo de nave único (HP/energía/escudo), condición de fin
 //!   de partida simétrica.
-//! - Fase 2: contratos (`games/starfighter/manifest.yaml`,
-//!   `contracts/action.schema.json`).
+//! - contratos autoritativos mantenidos por el repositorio Agentrix;
 //! - Fase 3: percepción aislada por slot (`Perception`, `RivalContact`
 //!   nunca expone energía/cooldown de un rival).
-//! - Fase 4 (`protocol`/`manifest`/`runner`): runner CLI real hablando
-//!   el protocolo de agente (ATD-007) por stdin/stdout con procesos de
-//!   bot externos.
+//! - integración Agentrix: el binario `starfighter-engine` recibe acciones
+//!   opacas desde Go y emite percepciones privadas y snapshots públicos.
 //!
 //! Valores de balance (HP, daño, costos de energía) son **placeholders**
 //! documentados en su lugar de definición: la afinación real es trabajo
@@ -26,13 +24,10 @@ use serde::Serialize;
 use std::ops::{Deref, DerefMut};
 
 pub mod envelope_engine;
-pub mod manifest;
 pub mod protocol;
-pub mod replay;
-pub mod runner;
 
 /// Inicializa `tracing` para escribir a **stderr**, nunca a stdout.
-/// stdout queda reservado para el protocolo de agente (ATD-007, Fase 4).
+/// stdout queda reservado para el protocolo `agentrix-engine/1`.
 pub fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -48,10 +43,8 @@ pub struct Settings {
     pub asteroid_count: u32,
     pub continuous_collision_detection: bool,
     /// Distancia máxima a la que un slot puede ver naves y balas
-    /// rivales (Decisión 2.3). Hoy está sincronizado a mano con
-    /// `games/starfighter/manifest.yaml` (`settings.radar_range`) --
-    /// recién en Fase 4 el runner va a leer el manifest real y construir
-    /// `Settings` desde ahí, no antes.
+    /// rivales. Agentrix lo entrega desde el manifest de Starfighter al
+    /// inicializar cada partida.
     pub radar_range: f32,
 }
 
@@ -231,7 +224,7 @@ pub struct MatchResult {
 
 /// Narración de lo que pasó en el tick actual -- Fase 5 (ATD-011), para
 /// el campo `events` de cada frame del replay. Quien orquesta la partida
-/// (`runner::run_match`) es responsable de vaciarlo antes de cada tick y
+/// (`envelope_engine`) es responsable de vaciarlo antes de cada tick y
 /// de leerlo después; el motor solo empuja strings acá, nunca lo limpia
 /// solo. No es un evento por cada micro-cambio de física -- solo lo que
 /// un espectador humano querría ver narrado (disparo, impacto,
@@ -693,7 +686,7 @@ fn check_match_end(
 // esos campos -- no es que se serialicen ocultos o en null, el tipo
 // directamente no los declara. Serialization con `serde` porque el
 // contrato de percepción es JSON (mismo criterio que
-// `games/starfighter/contracts/action.schema.json` de la Fase 2).
+// el contrato Starfighter del repositorio Agentrix).
 //
 // Decisión de diseño: las posiciones/velocidades de rivales y balas son
 // **relativas a la nave propia** (`relative_position`/`relative_velocity`

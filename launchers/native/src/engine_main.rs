@@ -5,10 +5,6 @@
 //! con bots directamente (eso lo maneja Go). Ver
 //! `bevy_starfighter::envelope_engine` para el detalle del protocolo.
 //!
-//! Distinto de `main.rs` (`native-launcher`, Fases 4-6), que sigue
-//! existiendo intacto como herramienta de testing/demo standalone
-//! hablando directo con bots por stdio.
-
 use bevy_starfighter::{envelope_engine, init_tracing};
 
 fn main() {

@@ -54,12 +54,3 @@ jobs:
       - name: Build
         if: steps.cache-build.outputs.cache-hit != 'true'
         run: cargo build
-
-  # build-wasm removed: launchers/wasm was excluded from the Cargo
-  # workspace during the Avian2D migration (Fase 0) -- it depended on
-  # Settings.opponent_policy, a .roguenet RL policy-loading field that no
-  # longer exists, and was still pinned to bevy 0.9. It is not part of
-  # Agentrix's integration surface (games/starfighter/, native-launcher,
-  # starfighter-engine); building it here would fail regardless of the
-  # toolchain fix above. release-gh-pages.yml still builds it on a
-  # version tag and has the same problem -- separate, not touched here.

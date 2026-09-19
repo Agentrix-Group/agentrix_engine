@@ -1,104 +1,33 @@
-name: release-native
+name: release-starfighter-engine
 
 on:
   push:
     tags:
       - "v*.*.*"
 
-env:
-  RELEASE_NAME: my_game
-  PUBLIC_URL: /bevy-shell-template/
-
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version-tag.outputs.VERSION }}
+  release:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: starfighter-engine-linux
+            binary: target/release/starfighter-engine
+          - os: macos-latest
+            artifact: starfighter-engine-macos
+            binary: target/release/starfighter-engine
+          - os: windows-latest
+            artifact: starfighter-engine-windows.exe
+            binary: target/release/starfighter-engine.exe
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Get tagged version
-        id: version-tag
-        run: echo "::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}"
-
-  release-windows:
-    needs: setup
-    runs-on: windows-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      - name: Build
-        run: |
-          cd ./launchers/native
-          cargo build --release
-      - name: Rename
-        run: |
-          mv ./target/release/native-launcher.exe ./${{ env.RELEASE_NAME }}.exe
-      - name: Zip release
-        uses: vimtor/action-zip@v1
+      - uses: actions/checkout@v4
+      - name: Build Starfighter engine
+        run: cargo build --release --bin starfighter-engine
+      - name: Stage artifact
+        shell: bash
+        run: cp "${{ matrix.binary }}" "${{ matrix.artifact }}"
+      - name: Publish release artifact
+        uses: softprops/action-gh-release@v2
         with:
-          files: assets/ ./${{ env.RELEASE_NAME }}.exe
-          recursive: false
-          dest: ./${{ env.RELEASE_NAME }}-${{ needs.setup.outputs.version }}-windows.zip
-      - name: Upload
-        uses: softprops/action-gh-release@v1
-        with:
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: true
-          files: ./${{ env.RELEASE_NAME }}-${{ needs.setup.outputs.version }}-windows.zip
-
-  release-mac:
-    needs: setup
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      - name: Build
-        run: |
-          cd ./launchers/native
-          cargo build --release
-      - name: Rename
-        run: |
-          mv ./target/release/native-launcher ./${{ env.RELEASE_NAME }}
-      - name: Zip release
-        uses: vimtor/action-zip@v1
-        with:
-          files: assets/ ./${{ env.RELEASE_NAME }}
-          recursive: false
-          dest: ./${{ env.RELEASE_NAME }}-${{ needs.setup.outputs.version }}-darwin.zip
-      - name: Upload
-        uses: softprops/action-gh-release@v1
-        with:
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: true
-          files: ./${{ env.RELEASE_NAME }}-${{ needs.setup.outputs.version }}-darwin.zip
-
-  release-ubuntu:
-    needs: setup
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      - name: Get dependencies
-        run: |
-          sudo apt install libasound2-dev libudev-dev pkg-config
-      - name: Build
-        run: |
-          cd ./launchers/native
-          cargo build --release
-      - name: Rename
-        run: |
-          mv ./target/release/native-launcher ./${{ env.RELEASE_NAME }}
-      - name: Zip release
-        uses: vimtor/action-zip@v1
-        with:
-          files: assets/ ./${{ env.RELEASE_NAME }}
-          recursive: false
-          dest: ./${{ env.RELEASE_NAME }}-${{ needs.setup.outputs.version }}-ubuntu.zip
-      - name: Upload
-        uses: softprops/action-gh-release@v1
-        with:
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: true
-          files: ./${{ env.RELEASE_NAME }}-${{ needs.setup.outputs.version }}-ubuntu.zip
+          files: ${{ matrix.artifact }}

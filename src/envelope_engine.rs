@@ -1,7 +1,5 @@
-//! Protocolo motor↔Go real de Agentrix (`Envelope`, `src/engine/types.go`
-//! en el repo Go) -- distinto y separado del protocolo bot↔runner de
-//! Fase 4 (`protocol.rs`/`runner.rs`), que sigue existiendo intacto como
-//! herramienta de testing/demo standalone (`native-launcher --scripts`).
+//! Protocolo motor↔Go de Agentrix (`Envelope`, `src/engine/types.go` en
+//! el repositorio Go). Es la única entrada ejecutable del motor.
 //!
 //! Acá el motor (este proceso) **nunca habla con bots directamente**.
 //! Go es quien maneja los bots (por su cuenta, protocolo separado) y le
@@ -27,22 +25,15 @@
 //!
 //! ## `stateHash`
 //!
-//! No se reutiliza `replay::ReplaySealer` (Fase 5) directamente: su API
-//! está diseñada para consumir-y-sellar una sola vez al final de la
-//! partida, no para exponer un digest intermedio en cada tick sin
-//! consumirse. En vez de extender esa API (riesgo de tocar código ya
-//! verificado de Fase 5 para un caso de uso distinto), acá se
-//! reimplementa la misma idea de forma independiente y más simple: un
-//! hash SHA-256 encadenado, `hash_n = SHA256(hash_{n-1} || bincode(estado_n))`,
-//! sembrado del `match_id`. Mismo principio que ATD-011 ("checksum
-//! acumulado"), sin acoplar este módulo a la implementación interna del
-//! sellado de replay.
+//! Cada snapshot público alimenta un hash SHA-256 encadenado,
+//! `hash_n = SHA256(hash_{n-1} || JSON(snapshot_n))`, sembrado con el
+//! `match_id`. Go guarda el snapshot y el hash sin recalcularlos.
 
 use crate::protocol::WireAction;
-use crate::runner::default_action;
 use crate::{
     build_app, build_perception, collect_bullet_snapshots, collect_fighter_snapshots, Bullet,
-    Fighter, FighterAction, FighterActionMessage, MatchResult, Settings, TickEvents,
+    Fighter, FighterAction, FighterActionMessage, MatchResult, Settings, Shield, Shoot, Thrust,
+    TickEvents, Turn,
 };
 use avian2d::prelude::LinearVelocity;
 use bevy::ecs::system::RunSystemOnce;
@@ -104,6 +95,8 @@ struct MatchInitializedResult {
     initial_tick: i64,
     #[serde(rename = "stateHash")]
     state_hash: String,
+    #[serde(rename = "publicSnapshot")]
+    public_snapshot: PublicSnapshot,
     perceptions: BTreeMap<String, crate::Perception>,
     events: Vec<String>,
 }
@@ -115,11 +108,33 @@ struct PlayerActionInput {
     payload: Option<Value>,
 }
 
+fn default_action() -> FighterAction {
+    FighterAction {
+        thrust: Thrust::Off,
+        turn: Turn::None,
+        shoot: Shoot::Off,
+        shield: Shield::Off,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct AdvanceTickRequest {
     #[allow(dead_code)]
     tick: i64,
     actions: BTreeMap<String, PlayerActionInput>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum FinishReason {
+    Eliminated,
+    Timeout,
+    ScoreLimit,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinishMatchRequest {
+    reason: FinishReason,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,8 +147,40 @@ struct TickResult {
     is_over: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     winner: Option<String>,
+    #[serde(rename = "publicSnapshot")]
+    public_snapshot: PublicSnapshot,
     #[serde(rename = "perceptions", skip_serializing_if = "Option::is_none")]
     perceptions: Option<BTreeMap<String, crate::Perception>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PublicFighter {
+    #[serde(rename = "playerId")]
+    player_id: String,
+    position: crate::Vec2Data,
+    velocity: crate::Vec2Data,
+    rotation: f32,
+    health: f32,
+    #[serde(rename = "shieldActive")]
+    shield_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PublicBullet {
+    #[serde(rename = "playerId")]
+    player_id: String,
+    position: crate::Vec2Data,
+    velocity: crate::Vec2Data,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PublicSnapshot {
+    tick: i64,
+    fighters: Vec<PublicFighter>,
+    bullets: Vec<PublicBullet>,
+    events: Vec<String>,
+    #[serde(rename = "stateHash")]
+    state_hash: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,7 +195,7 @@ struct PlayerRank {
 struct MatchResultPayload {
     #[serde(rename = "finalTick")]
     final_tick: i64,
-    reason: String,
+    reason: FinishReason,
     #[serde(skip_serializing_if = "Option::is_none")]
     winner: Option<String>,
     scores: BTreeMap<String, i64>,
@@ -165,8 +212,7 @@ struct EngineReadyPayload {
     supported_protocols: Vec<String>,
 }
 
-/// Digest encadenado independiente de `replay::ReplaySealer` -- ver nota
-/// de módulo sobre por qué no se reutiliza esa API acá.
+/// Digest encadenado del estado público que Agentrix guarda por tick.
 struct ChainedHash {
     running: Vec<u8>,
 }
@@ -200,6 +246,10 @@ struct MatchState {
     radar_range: f32,
     max_ticks: i64,
     hash: ChainedHash,
+    current_tick: i64,
+    final_state_hash: String,
+    forced_winner: Option<String>,
+    end_reason: Option<FinishReason>,
 }
 
 fn radar_range_from_config(config: &Option<Value>) -> f32 {
@@ -242,6 +292,49 @@ fn build_all_perceptions(
         }
     }
     out
+}
+
+fn public_entities(
+    state: &MatchState,
+    fighters: &[crate::FighterSnapshot],
+    bullets: &[crate::BulletSnapshot],
+) -> (Vec<PublicFighter>, Vec<PublicBullet>) {
+    let public_fighters = fighters
+        .iter()
+        .filter_map(|fighter| {
+            state
+                .players
+                .get(fighter.player_id)
+                .map(|id| PublicFighter {
+                    player_id: id.clone(),
+                    position: fighter.position.into(),
+                    velocity: fighter.velocity.into(),
+                    rotation: fighter.facing.y.atan2(fighter.facing.x),
+                    health: fighter.health,
+                    shield_active: fighter.shield_active,
+                })
+        })
+        .collect();
+    let public_bullets = bullets
+        .iter()
+        .filter_map(|bullet| {
+            state.players.get(bullet.player_id).map(|id| PublicBullet {
+                player_id: id.clone(),
+                position: bullet.position.into(),
+                velocity: bullet.velocity.into(),
+            })
+        })
+        .collect();
+    (public_fighters, public_bullets)
+}
+
+fn snapshot_hash_input(
+    tick: i64,
+    fighters: &[PublicFighter],
+    bullets: &[PublicBullet],
+    events: &[String],
+) -> Vec<u8> {
+    serde_json::to_vec(&(tick, fighters, bullets, events)).unwrap_or_default()
 }
 
 /// Loop principal: lee `Envelope`s de stdin, despacha, escribe la
@@ -330,11 +423,28 @@ pub fn run_stdio_server() {
                     radar_range,
                     max_ticks: req.max_ticks,
                     hash,
+                    current_tick: 0,
+                    final_state_hash: String::new(),
+                    forced_winner: None,
+                    end_reason: None,
                 };
                 let perceptions = build_all_perceptions(&match_state, 0, &fighters, &bullets);
-                let state_hash = match_state
-                    .hash
-                    .push(&bincode::serialize(&fighters.len()).unwrap_or_default());
+                let (public_fighters, public_bullets) =
+                    public_entities(&match_state, &fighters, &bullets);
+                let state_hash = match_state.hash.push(&snapshot_hash_input(
+                    0,
+                    &public_fighters,
+                    &public_bullets,
+                    &[],
+                ));
+                match_state.final_state_hash = state_hash.clone();
+                let public_snapshot = PublicSnapshot {
+                    tick: 0,
+                    fighters: public_fighters,
+                    bullets: public_bullets,
+                    events: vec![],
+                    state_hash: state_hash.clone(),
+                };
 
                 send(
                     &mut stdout,
@@ -345,6 +455,7 @@ pub fn run_stdio_server() {
                         match_id: req.match_id.clone(),
                         initial_tick: 0,
                         state_hash,
+                        public_snapshot,
                         perceptions,
                         events: vec![],
                     },
@@ -354,7 +465,12 @@ pub fn run_stdio_server() {
 
             TYPE_ADVANCE_TICK => {
                 let Some(ref mut st) = state else {
-                    send_error(&mut stdout, &mut out_seq, &env.match_id, "match no inicializado");
+                    send_error(
+                        &mut stdout,
+                        &mut out_seq,
+                        &env.match_id,
+                        "match no inicializado",
+                    );
                     continue;
                 };
                 let req: AdvanceTickRequest = match serde_json::from_value(env.payload) {
@@ -364,9 +480,31 @@ pub fn run_stdio_server() {
                         continue;
                     }
                 };
+                if req.tick != st.current_tick {
+                    send_error(
+                        &mut stdout,
+                        &mut out_seq,
+                        &st.match_id,
+                        &format!(
+                            "tick fuera de secuencia: recibido {}, esperado {}",
+                            req.tick, st.current_tick
+                        ),
+                    );
+                    continue;
+                }
 
                 let mut actions_this_tick: Vec<(Entity, FighterAction)> = Vec::new();
                 for (player_id, go_id) in st.players.iter().enumerate() {
+                    if let Some(input) = req.actions.get(go_id) {
+                        if input.status == "disqualified" {
+                            st.end_reason = Some(FinishReason::Timeout);
+                            st.forced_winner = st
+                                .players
+                                .iter()
+                                .find(|candidate| *candidate != go_id)
+                                .cloned();
+                        }
+                    }
                     let action = req
                         .actions
                         .get(go_id)
@@ -400,77 +538,99 @@ pub fn run_stdio_server() {
                 let match_result = *st.app.world().resource::<MatchResult>();
 
                 let (fighters, bullets) = read_snapshots(&mut st.app);
-                let tick_num = req.tick;
-                let state_hash = st.hash.push(&bincode::serialize(&events).unwrap_or_default());
-                let is_over = match_result.finished || (tick_num as i64) >= st.max_ticks;
-                let winner = match_result.winner.and_then(|w| st.players.get(w).cloned());
-
-                if is_over {
-                    let scores: BTreeMap<String, i64> = st
-                        .players
-                        .iter()
-                        .enumerate()
-                        .map(|(i, id)| (id.clone(), if Some(i) == match_result.winner { 1 } else { 0 }))
-                        .collect();
-                    let rankings: Vec<PlayerRank> = st
-                        .players
-                        .iter()
-                        .enumerate()
-                        .map(|(i, id)| PlayerRank {
-                            player_id: id.clone(),
-                            rank: if Some(i) == match_result.winner { 1 } else { 2 },
-                            score: if Some(i) == match_result.winner { 1 } else { 0 },
-                        })
-                        .collect();
-                    send(
-                        &mut stdout,
-                        &mut out_seq,
-                        &st.match_id,
-                        TYPE_MATCH_COMPLETED,
-                        &MatchResultPayload {
-                            final_tick: tick_num,
-                            reason: if match_result.finished {
-                                "match_result".to_string()
-                            } else {
-                                "max_ticks_reached".to_string()
-                            },
-                            winner,
-                            scores,
-                            rankings,
-                            final_state_hash: state_hash,
-                        },
-                    );
-                } else {
-                    let perceptions = build_all_perceptions(st, tick_num as u64 + 1, &fighters, &bullets);
-                    send(
-                        &mut stdout,
-                        &mut out_seq,
-                        &st.match_id,
-                        TYPE_TICK_COMPLETED,
-                        &TickResult {
-                            tick: tick_num,
-                            events,
-                            state_hash,
-                            is_over: false,
-                            winner: None,
-                            perceptions: Some(perceptions),
-                        },
-                    );
+                let resulting_tick = req.tick + 1;
+                st.current_tick = resulting_tick;
+                let (public_fighters, public_bullets) = public_entities(st, &fighters, &bullets);
+                let state_hash = st.hash.push(&snapshot_hash_input(
+                    resulting_tick,
+                    &public_fighters,
+                    &public_bullets,
+                    &events,
+                ));
+                st.final_state_hash = state_hash.clone();
+                let public_snapshot = PublicSnapshot {
+                    tick: resulting_tick,
+                    fighters: public_fighters,
+                    bullets: public_bullets,
+                    events: events.clone(),
+                    state_hash: state_hash.clone(),
+                };
+                if st.end_reason.is_none() {
+                    if match_result.finished {
+                        st.end_reason = Some(FinishReason::Eliminated);
+                    } else if resulting_tick >= st.max_ticks {
+                        st.end_reason = Some(FinishReason::ScoreLimit);
+                    }
                 }
+                let is_over = st.end_reason.is_some();
+                let winner = st.forced_winner.clone().or_else(|| {
+                    match_result
+                        .winner
+                        .and_then(|winner_id| st.players.get(winner_id).cloned())
+                });
+                // Every simulated state carries its private perceptions and its
+                // public replay snapshot in the same tick_completed envelope.
+                // A destroyed fighter is naturally absent because it can no
+                // longer perceive; surviving slots still receive State[N].
+                let perceptions = Some(build_all_perceptions(
+                    st,
+                    resulting_tick as u64,
+                    &fighters,
+                    &bullets,
+                ));
+                send(
+                    &mut stdout,
+                    &mut out_seq,
+                    &st.match_id,
+                    TYPE_TICK_COMPLETED,
+                    &TickResult {
+                        tick: resulting_tick,
+                        events,
+                        state_hash,
+                        is_over,
+                        winner,
+                        public_snapshot,
+                        perceptions,
+                    },
+                );
             }
 
             TYPE_FINISH_MATCH => {
                 let Some(ref st) = state else {
-                    send_error(&mut stdout, &mut out_seq, &env.match_id, "match no inicializado");
+                    send_error(
+                        &mut stdout,
+                        &mut out_seq,
+                        &env.match_id,
+                        "match no inicializado",
+                    );
                     continue;
                 };
+                let req: FinishMatchRequest = match serde_json::from_value(env.payload) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        send_error(&mut stdout, &mut out_seq, &st.match_id, &error.to_string());
+                        continue;
+                    }
+                };
                 let match_result = *st.app.world().resource::<MatchResult>();
-                let winner = match_result.winner.and_then(|w| st.players.get(w).cloned());
+                let winner = st.forced_winner.clone().or_else(|| {
+                    match_result
+                        .winner
+                        .and_then(|winner_id| st.players.get(winner_id).cloned())
+                });
                 let scores: BTreeMap<String, i64> = st
                     .players
                     .iter()
-                    .enumerate()
-                    .map(|(i, id)| (id.clone(), if Some(i) == match_result.winner { 1 } else { 0 }))
+                    .map(|id| (id.clone(), if Some(id) == winner.as_ref() { 1 } else { 0 }))
+                    .collect();
+                let rankings = st
+                    .players
+                    .iter()
+                    .map(|id| PlayerRank {
+                        player_id: id.clone(),
+                        rank: if Some(id) == winner.as_ref() { 1 } else { 2 },
+                        score: if Some(id) == winner.as_ref() { 1 } else { 0 },
+                    })
                     .collect();
                 send(
                     &mut stdout,
@@ -478,24 +638,35 @@ pub fn run_stdio_server() {
                     &st.match_id,
                     TYPE_MATCH_COMPLETED,
                     &MatchResultPayload {
-                        final_tick: 0,
-                        reason: "finish_match_requested".to_string(),
+                        final_tick: st.current_tick,
+                        reason: st.end_reason.clone().unwrap_or(req.reason),
                         winner,
                         scores,
-                        rankings: vec![],
-                        final_state_hash: String::new(),
+                        rankings,
+                        final_state_hash: st.final_state_hash.clone(),
                     },
                 );
             }
 
             TYPE_SHUTDOWN => {
-                send(&mut stdout, &mut out_seq, &env.match_id, TYPE_SHUTDOWN_ACK, &serde_json::json!({}));
+                send(
+                    &mut stdout,
+                    &mut out_seq,
+                    &env.match_id,
+                    TYPE_SHUTDOWN_ACK,
+                    &serde_json::json!({}),
+                );
                 break;
             }
 
             other => {
                 tracing::error!(target: "platform", "tipo de mensaje desconocido de Go: {other}");
-                send_error(&mut stdout, &mut out_seq, &env.match_id, &format!("unknown type: {other}"));
+                send_error(
+                    &mut stdout,
+                    &mut out_seq,
+                    &env.match_id,
+                    &format!("unknown type: {other}"),
+                );
             }
         }
     }
