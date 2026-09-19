@@ -229,7 +229,8 @@ pub struct MatchResult {
 /// solo. No es un evento por cada micro-cambio de física -- solo lo que
 /// un espectador humano querría ver narrado (disparo, impacto,
 /// destrucción, fin de partida), mismo criterio que "eventos
-/// destacados" de `06_ux_y_lenguaje_visual.md`.
+/// destacados" documentado en Agentrix en
+/// `docs/architecture/replay-and-results.md`.
 #[derive(Resource, Default, Clone, Debug)]
 pub struct TickEvents(pub Vec<String>);
 
