@@ -31,8 +31,9 @@
 
 use crate::protocol::WireAction;
 use crate::{
-    build_app, build_perception, collect_bullet_snapshots, collect_fighter_snapshots, Bullet,
-    Fighter, FighterAction, FighterActionMessage, MatchResult, Settings, Shield, Shoot, Thrust,
+    build_app, build_perception, collect_bullet_snapshots,
+    collect_fighter_snapshots, Bullet, Fighter, FighterAction,
+    FighterActionMessage, MatchResult, Settings, Shield, Shoot, Thrust,
     TickEvents, Turn,
 };
 use avian2d::prelude::LinearVelocity;
@@ -78,8 +79,10 @@ struct InitializeMatchRequest {
     #[allow(dead_code)]
     game_id: String,
     seed: i64,
-    #[serde(rename = "fixedTimestepMs")]
+    #[serde(rename = "fixedTimestepMs", default)]
     fixed_timestep_ms: i64,
+    #[serde(rename = "tickHz", default)]
+    tick_hz: Option<f64>,
     #[serde(rename = "maxTicks")]
     max_ticks: i64,
     players: Vec<String>,
@@ -252,18 +255,9 @@ struct MatchState {
     end_reason: Option<FinishReason>,
 }
 
-fn radar_range_from_config(config: &Option<Value>) -> f32 {
-    let Some(Value::Object(map)) = config else {
-        return 800.0;
-    };
-    match map.get("radar_range") {
-        Some(Value::String(s)) => s.parse().unwrap_or(800.0),
-        Some(Value::Number(n)) => n.as_f64().unwrap_or(800.0) as f32,
-        _ => 800.0,
-    }
-}
-
-fn read_snapshots(app: &mut App) -> (Vec<crate::FighterSnapshot>, Vec<crate::BulletSnapshot>) {
+fn read_snapshots(
+    app: &mut App,
+) -> (Vec<crate::FighterSnapshot>, Vec<crate::BulletSnapshot>) {
     let fighters = app
         .world_mut()
         .run_system_once(|q: Query<(&Fighter, &Transform, &LinearVelocity)>| {
@@ -287,7 +281,13 @@ fn build_all_perceptions(
 ) -> BTreeMap<String, crate::Perception> {
     let mut out = BTreeMap::new();
     for (player_id, go_id) in state.players.iter().enumerate() {
-        if let Some(p) = build_perception(tick, player_id, state.radar_range, fighters, bullets) {
+        if let Some(p) = build_perception(
+            tick,
+            player_id,
+            state.radar_range,
+            fighters,
+            bullets,
+        ) {
             out.insert(go_id.clone(), p);
         }
     }
@@ -341,10 +341,21 @@ fn snapshot_hash_input(
 /// respuesta a stdout. Bloqueante y de un solo hilo a propósito -- Go
 /// habla con un motor a la vez, secuencialmente (`AdvanceTick` espera la
 /// respuesta antes de mandar el siguiente).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineLifecycleState {
+    Ready,
+    Initialized,
+    Running,
+    Finished,
+    Shutdown,
+}
+
 pub fn run_stdio_server() {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut out_seq: u64 = 1;
+    let mut expected_in_seq: u64 = 1;
+    let mut lifecycle = EngineLifecycleState::Ready;
 
     send(
         &mut stdout,
@@ -368,21 +379,124 @@ pub fn run_stdio_server() {
             Ok(e) => e,
             Err(e) => {
                 tracing::error!(target: "platform", "envelope inválido de Go: {e}");
+                send_error_with_code(
+                    &mut stdout,
+                    &mut out_seq,
+                    "",
+                    "ERR_INVALID_JSON",
+                    &format!("malformed JSON envelope: {e}"),
+                    true,
+                );
                 continue;
             }
         };
 
+        if env.protocol_version != PROTOCOL_VERSION {
+            send_error_with_code(
+                &mut stdout,
+                &mut out_seq,
+                &env.match_id,
+                "ERR_INCOMPATIBLE_VERSION",
+                &format!(
+                    "incompatible protocol version: expected {PROTOCOL_VERSION}, got {}",
+                    env.protocol_version
+                ),
+                true,
+            );
+            continue;
+        }
+
+        if env.sequence != expected_in_seq {
+            send_error_with_code(
+                &mut stdout,
+                &mut out_seq,
+                &env.match_id,
+                "ERR_INVALID_SEQUENCE",
+                &format!(
+                    "invalid sequence: expected {expected_in_seq}, got {}",
+                    env.sequence
+                ),
+                true,
+            );
+            continue;
+        }
+        expected_in_seq += 1;
+
         match env.msg_type.as_str() {
             TYPE_INITIALIZE_MATCH => {
-                let req: InitializeMatchRequest = match serde_json::from_value(env.payload) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        send_error(&mut stdout, &mut out_seq, &env.match_id, &e.to_string());
-                        continue;
+                if lifecycle != EngineLifecycleState::Ready {
+                    send_error_with_code(
+                        &mut stdout,
+                        &mut out_seq,
+                        &env.match_id,
+                        "ERR_INVALID_STATE",
+                        &format!("cannot initialize match: engine is in state {lifecycle:?}"),
+                        true,
+                    );
+                    continue;
+                }
+                if env.match_id.trim().is_empty() {
+                    send_error_with_code(
+                        &mut stdout,
+                        &mut out_seq,
+                        "",
+                        "ERR_INVALID_MATCH_ID",
+                        "matchId cannot be empty",
+                        true,
+                    );
+                    continue;
+                }
+                let req: InitializeMatchRequest =
+                    match serde_json::from_value(env.payload) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            send_error_with_code(
+                                &mut stdout,
+                                &mut out_seq,
+                                &env.match_id,
+                                "ERR_INVALID_PAYLOAD",
+                                &e.to_string(),
+                                true,
+                            );
+                            continue;
+                        }
+                    };
+                if req.match_id != env.match_id {
+                    send_error_with_code(
+                        &mut stdout,
+                        &mut out_seq,
+                        &env.match_id,
+                        "ERR_MATCH_ID_MISMATCH",
+                        "matchId in payload does not match envelope",
+                        true,
+                    );
+                    continue;
+                }
+                if req.players.is_empty() {
+                    send_error_with_code(
+                        &mut stdout,
+                        &mut out_seq,
+                        &env.match_id,
+                        "ERR_INVALID_PLAYERS",
+                        "players list cannot be empty",
+                        true,
+                    );
+                    continue;
+                }
+
+                let starfighter_config =
+                    crate::StarfighterConfig::from_value_or_default(
+                        &req.config,
+                    );
+                let tick_hz = if let Some(hz) = req.tick_hz {
+                    if hz > 0.0 {
+                        hz
+                    } else {
+                        starfighter_config.tick_hz
                     }
-                };
-                let radar_range = radar_range_from_config(&req.config);
-                let tick_hz = if req.fixed_timestep_ms > 0 {
+                } else if starfighter_config.tick_hz > 0.0 {
+                    starfighter_config.tick_hz
+                } else if req.fixed_timestep_ms > 0 {
                     1000.0 / req.fixed_timestep_ms as f64
                 } else {
                     60.0
@@ -391,20 +505,24 @@ pub fn run_stdio_server() {
                     seed: req.seed as u64,
                     tick_hz,
                     players: req.players.len() as u32,
-                    asteroid_count: 0,
+                    asteroid_count: starfighter_config.asteroid_count,
                     continuous_collision_detection: true,
-                    radar_range,
+                    radar_range: starfighter_config.radar_range,
+                    config: starfighter_config.clone(),
                 };
                 let mut app = build_app(settings);
                 app.finish();
                 app.cleanup();
-                app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-                    Duration::from_secs_f64(1.0 / tick_hz),
-                ));
+                app.insert_resource(
+                    bevy::time::TimeUpdateStrategy::ManualDuration(
+                        Duration::from_secs_f64(1.0 / tick_hz),
+                    ),
+                );
                 app.update(); // Startup: spawnea las naves.
 
                 let entities: Vec<Entity> = {
-                    let mut query = app.world_mut().query::<(Entity, &Fighter)>();
+                    let mut query =
+                        app.world_mut().query::<(Entity, &Fighter)>();
                     let mut pairs: Vec<(usize, Entity)> = query
                         .iter(app.world())
                         .map(|(e, f)| (f.player_id, e))
@@ -420,7 +538,7 @@ pub fn run_stdio_server() {
                     match_id: req.match_id.clone(),
                     players: req.players.clone(),
                     entities,
-                    radar_range,
+                    radar_range: starfighter_config.radar_range,
                     max_ticks: req.max_ticks,
                     hash,
                     current_tick: 0,
@@ -428,7 +546,8 @@ pub fn run_stdio_server() {
                     forced_winner: None,
                     end_reason: None,
                 };
-                let perceptions = build_all_perceptions(&match_state, 0, &fighters, &bullets);
+                let perceptions =
+                    build_all_perceptions(&match_state, 0, &fighters, &bullets);
                 let (public_fighters, public_bullets) =
                     public_entities(&match_state, &fighters, &bullets);
                 let state_hash = match_state.hash.push(&snapshot_hash_input(
@@ -460,51 +579,98 @@ pub fn run_stdio_server() {
                         events: vec![],
                     },
                 );
+                lifecycle = EngineLifecycleState::Initialized;
                 state = Some(match_state);
             }
 
             TYPE_ADVANCE_TICK => {
-                let Some(ref mut st) = state else {
-                    send_error(
+                if lifecycle != EngineLifecycleState::Initialized
+                    && lifecycle != EngineLifecycleState::Running
+                {
+                    send_error_with_code(
                         &mut stdout,
                         &mut out_seq,
                         &env.match_id,
-                        "match no inicializado",
+                        "ERR_INVALID_STATE",
+                        &format!(
+                            "cannot advance tick: match is not active (state: {lifecycle:?})"
+                        ),
+                        true,
                     );
                     continue;
+                }
+                let Some(ref mut st) = state else {
+                    continue;
                 };
-                let req: AdvanceTickRequest = match serde_json::from_value(env.payload) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        send_error(&mut stdout, &mut out_seq, &st.match_id, &e.to_string());
-                        continue;
-                    }
-                };
+                if env.match_id != st.match_id {
+                    send_error_with_code(
+                        &mut stdout,
+                        &mut out_seq,
+                        &env.match_id,
+                        "ERR_MATCH_ID_MISMATCH",
+                        &format!(
+                            "matchId mismatch: active match is {}, got {}",
+                            st.match_id, env.match_id
+                        ),
+                        true,
+                    );
+                    continue;
+                }
+                let req: AdvanceTickRequest =
+                    match serde_json::from_value(env.payload) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            send_error_with_code(
+                                &mut stdout,
+                                &mut out_seq,
+                                &st.match_id,
+                                "ERR_INVALID_PAYLOAD",
+                                &e.to_string(),
+                                false,
+                            );
+                            continue;
+                        }
+                    };
                 if req.tick != st.current_tick {
-                    send_error(
+                    send_error_with_code(
                         &mut stdout,
                         &mut out_seq,
                         &st.match_id,
+                        "ERR_TICK_OUT_OF_SEQUENCE",
                         &format!(
                             "tick fuera de secuencia: recibido {}, esperado {}",
                             req.tick, st.current_tick
                         ),
+                        false,
                     );
                     continue;
                 }
 
-                let mut actions_this_tick: Vec<(Entity, FighterAction)> = Vec::new();
-                for (player_id, go_id) in st.players.iter().enumerate() {
+                let mut actions_this_tick: Vec<(Entity, FighterAction)> =
+                    Vec::new();
+                let mut disqualified: Vec<String> = Vec::new();
+                for go_id in &st.players {
                     if let Some(input) = req.actions.get(go_id) {
                         if input.status == "disqualified" {
-                            st.end_reason = Some(FinishReason::Timeout);
-                            st.forced_winner = st
-                                .players
-                                .iter()
-                                .find(|candidate| *candidate != go_id)
-                                .cloned();
+                            disqualified.push(go_id.clone());
                         }
                     }
+                }
+                if disqualified.len() >= st.players.len()
+                    && !st.players.is_empty()
+                {
+                    st.end_reason = Some(FinishReason::Timeout);
+                    st.forced_winner = None;
+                } else if let Some(dq_id) = disqualified.first() {
+                    st.end_reason = Some(FinishReason::Timeout);
+                    st.forced_winner = st
+                        .players
+                        .iter()
+                        .find(|candidate| *candidate != dq_id)
+                        .cloned();
+                }
+
+                for (player_id, go_id) in st.players.iter().enumerate() {
                     let action = req
                         .actions
                         .get(go_id)
@@ -523,24 +689,33 @@ pub fn run_stdio_server() {
                             }
                         })
                         .unwrap_or_else(default_action);
-                    actions_this_tick.push((st.entities[player_id], action));
+                    if let Some(&entity) = st.entities.get(player_id) {
+                        actions_this_tick.push((entity, action));
+                    }
                 }
 
-                for (entity, action) in actions_this_tick {
-                    st.app
+                let (events, match_result) = {
+                    let mut writer = st
+                        .app
                         .world_mut()
-                        .write_message(FighterActionMessage { action, entity });
-                }
+                        .resource_mut::<Messages<FighterActionMessage>>();
+                    for (entity, action) in actions_this_tick {
+                        writer.write(FighterActionMessage { action, entity });
+                    }
+                    st.app.world_mut().resource_mut::<TickEvents>().0.clear();
+                    st.app.update();
+                    let events =
+                        st.app.world().resource::<TickEvents>().0.clone();
+                    let result = *st.app.world().resource::<MatchResult>();
+                    (events, result)
+                };
 
-                st.app.world_mut().resource_mut::<TickEvents>().0.clear();
-                st.app.update();
-                let events = st.app.world().resource::<TickEvents>().0.clone();
-                let match_result = *st.app.world().resource::<MatchResult>();
+                let resulting_tick = st.current_tick + 1;
+                st.current_tick = resulting_tick;
 
                 let (fighters, bullets) = read_snapshots(&mut st.app);
-                let resulting_tick = req.tick + 1;
-                st.current_tick = resulting_tick;
-                let (public_fighters, public_bullets) = public_entities(st, &fighters, &bullets);
+                let (public_fighters, public_bullets) =
+                    public_entities(st, &fighters, &bullets);
                 let state_hash = st.hash.push(&snapshot_hash_input(
                     resulting_tick,
                     &public_fighters,
@@ -563,10 +738,15 @@ pub fn run_stdio_server() {
                     }
                 }
                 let is_over = st.end_reason.is_some();
+                if is_over {
+                    lifecycle = EngineLifecycleState::Finished;
+                } else {
+                    lifecycle = EngineLifecycleState::Running;
+                }
                 let winner = st.forced_winner.clone().or_else(|| {
-                    match_result
-                        .winner
-                        .and_then(|winner_id| st.players.get(winner_id).cloned())
+                    match_result.winner.and_then(|winner_id| {
+                        st.players.get(winner_id).cloned()
+                    })
                 });
                 // Every simulated state carries its private perceptions and its
                 // public replay snapshot in the same tick_completed envelope.
@@ -596,39 +776,80 @@ pub fn run_stdio_server() {
             }
 
             TYPE_FINISH_MATCH => {
-                let Some(ref st) = state else {
-                    send_error(
+                if lifecycle != EngineLifecycleState::Initialized
+                    && lifecycle != EngineLifecycleState::Running
+                    && lifecycle != EngineLifecycleState::Finished
+                {
+                    send_error_with_code(
                         &mut stdout,
                         &mut out_seq,
                         &env.match_id,
-                        "match no inicializado",
+                        "ERR_INVALID_STATE",
+                        "cannot finish match: match not initialized",
+                        true,
                     );
                     continue;
+                }
+                let Some(ref st) = state else {
+                    continue;
                 };
-                let req: FinishMatchRequest = match serde_json::from_value(env.payload) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        send_error(&mut stdout, &mut out_seq, &st.match_id, &error.to_string());
-                        continue;
-                    }
-                };
+                if env.match_id != st.match_id {
+                    send_error_with_code(
+                        &mut stdout,
+                        &mut out_seq,
+                        &env.match_id,
+                        "ERR_MATCH_ID_MISMATCH",
+                        &format!(
+                            "matchId mismatch: active match is {}, got {}",
+                            st.match_id, env.match_id
+                        ),
+                        true,
+                    );
+                    continue;
+                }
+                let req: FinishMatchRequest =
+                    match serde_json::from_value(env.payload) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            send_error_with_code(
+                                &mut stdout,
+                                &mut out_seq,
+                                &st.match_id,
+                                "ERR_INVALID_PAYLOAD",
+                                &error.to_string(),
+                                false,
+                            );
+                            continue;
+                        }
+                    };
                 let match_result = *st.app.world().resource::<MatchResult>();
                 let winner = st.forced_winner.clone().or_else(|| {
-                    match_result
-                        .winner
-                        .and_then(|winner_id| st.players.get(winner_id).cloned())
+                    match_result.winner.and_then(|winner_id| {
+                        st.players.get(winner_id).cloned()
+                    })
                 });
                 let scores: BTreeMap<String, i64> = st
                     .players
                     .iter()
-                    .map(|id| (id.clone(), if Some(id) == winner.as_ref() { 1 } else { 0 }))
+                    .map(|id| {
+                        (
+                            id.clone(),
+                            if Some(id) == winner.as_ref() { 1 } else { 0 },
+                        )
+                    })
                     .collect();
                 let rankings = st
                     .players
                     .iter()
                     .map(|id| PlayerRank {
                         player_id: id.clone(),
-                        rank: if Some(id) == winner.as_ref() { 1 } else { 2 },
+                        rank: if Some(id) == winner.as_ref() {
+                            1
+                        } else if winner.is_some() {
+                            2
+                        } else {
+                            1
+                        },
                         score: if Some(id) == winner.as_ref() { 1 } else { 0 },
                     })
                     .collect();
@@ -639,13 +860,14 @@ pub fn run_stdio_server() {
                     TYPE_MATCH_COMPLETED,
                     &MatchResultPayload {
                         final_tick: st.current_tick,
-                        reason: st.end_reason.clone().unwrap_or(req.reason),
+                        reason: st.end_reason.unwrap_or(req.reason),
                         winner,
                         scores,
                         rankings,
                         final_state_hash: st.final_state_hash.clone(),
                     },
                 );
+                lifecycle = EngineLifecycleState::Finished;
             }
 
             TYPE_SHUTDOWN => {
@@ -661,11 +883,13 @@ pub fn run_stdio_server() {
 
             other => {
                 tracing::error!(target: "platform", "tipo de mensaje desconocido de Go: {other}");
-                send_error(
+                send_error_with_code(
                     &mut stdout,
                     &mut out_seq,
                     &env.match_id,
-                    &format!("unknown type: {other}"),
+                    "ERR_UNKNOWN_MESSAGE_TYPE",
+                    &format!("unknown message type: {other}"),
+                    true,
                 );
             }
         }
@@ -684,7 +908,8 @@ fn send<T: Serialize>(
         msg_type: msg_type.to_string(),
         match_id: match_id.to_string(),
         sequence: *seq,
-        payload: serde_json::to_value(payload).expect("payload siempre serializa"),
+        payload: serde_json::to_value(payload)
+            .expect("payload siempre serializa"),
     };
     *seq += 1;
     let line = serde_json::to_string(&env).expect("Envelope siempre serializa");
@@ -692,12 +917,23 @@ fn send<T: Serialize>(
     let _ = stdout.flush();
 }
 
-fn send_error(stdout: &mut std::io::Stdout, seq: &mut u64, match_id: &str, message: &str) {
+fn send_error_with_code(
+    stdout: &mut std::io::Stdout,
+    seq: &mut u64,
+    match_id: &str,
+    code: &str,
+    message: &str,
+    fatal: bool,
+) {
     send(
         stdout,
         seq,
         match_id,
         TYPE_ENGINE_ERROR,
-        &serde_json::json!({"code": "internal_error", "message": message, "fatal": false}),
+        &serde_json::json!({
+            "code": code,
+            "message": message,
+            "fatal": fatal
+        }),
     );
 }

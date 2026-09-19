@@ -17,6 +17,14 @@ jobs:
       - name: Install dependencies
         run: sudo apt install libasound2-dev libudev-dev pkg-config
 
+      # Formatting check
+      - name: Formatting
+        run: cargo fmt --check
+
+      # Clippy linter
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
       # Unit testing
       - name: Test
         run: cargo test --workspace

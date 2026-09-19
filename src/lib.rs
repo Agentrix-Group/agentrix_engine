@@ -20,7 +20,7 @@ use avian2d::prelude::*;
 use bevy::prelude::*;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 
 pub mod envelope_engine;
@@ -35,6 +35,228 @@ pub fn init_tracing() {
         .try_init();
 }
 
+/// Configuración autoritativa del juego Starfighter. Define todos los
+/// parámetros ajustables de simulación, combate y dimensiones de arena.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StarfighterConfig {
+    #[serde(rename = "tick_hz", alias = "tickHz")]
+    pub tick_hz: f64,
+    #[serde(rename = "arena_width", alias = "arenaWidth")]
+    pub arena_width: f32,
+    #[serde(rename = "arena_height", alias = "arenaHeight")]
+    pub arena_height: f32,
+    #[serde(rename = "ship_max_health", alias = "shipMaxHealth")]
+    pub ship_max_health: f32,
+    #[serde(rename = "ship_max_energy", alias = "shipMaxEnergy")]
+    pub ship_max_energy: f32,
+    #[serde(rename = "bullet_damage", alias = "bulletDamage")]
+    pub bullet_damage: f32,
+    #[serde(rename = "asteroid_damage", alias = "asteroidDamage")]
+    pub asteroid_damage: f32,
+    #[serde(rename = "shoot_energy_cost", alias = "shootEnergyCost")]
+    pub shoot_energy_cost: f32,
+    #[serde(
+        rename = "shield_energy_cost_per_tick",
+        alias = "shieldEnergyCostPerTick"
+    )]
+    pub shield_energy_cost_per_tick: f32,
+    #[serde(
+        rename = "shield_damage_reduction",
+        alias = "shieldDamageReduction"
+    )]
+    pub shield_damage_reduction: f32,
+    #[serde(rename = "energy_regen_per_tick", alias = "energyRegenPerTick")]
+    pub energy_regen_per_tick: f32,
+    #[serde(rename = "radar_range", alias = "radarRange")]
+    pub radar_range: f32,
+    #[serde(rename = "asteroid_count", alias = "asteroidCount")]
+    pub asteroid_count: u32,
+}
+
+impl Default for StarfighterConfig {
+    fn default() -> Self {
+        StarfighterConfig {
+            tick_hz: 60.0,
+            arena_width: 2000.0,
+            arena_height: 1000.0,
+            ship_max_health: 100.0,
+            ship_max_energy: 100.0,
+            bullet_damage: 25.0,
+            asteroid_damage: 100.0,
+            shoot_energy_cost: 15.0,
+            shield_energy_cost_per_tick: 1.0,
+            shield_damage_reduction: 0.7,
+            energy_regen_per_tick: 0.5,
+            radar_range: 800.0,
+            asteroid_count: 5,
+        }
+    }
+}
+
+impl StarfighterConfig {
+    pub fn from_value_or_default(val: &Option<serde_json::Value>) -> Self {
+        let Some(val) = val else {
+            return Self::default();
+        };
+        if let serde_json::Value::Object(map) = val {
+            let mut cfg = Self::default();
+            if let Some(v) = map.get("tick_hz").or_else(|| map.get("tickHz")) {
+                if let Some(n) = v.as_f64() {
+                    cfg.tick_hz = n;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<f64>() {
+                        cfg.tick_hz = n;
+                    }
+                }
+            }
+            if let Some(v) =
+                map.get("arena_width").or_else(|| map.get("arenaWidth"))
+            {
+                if let Some(n) = v.as_f64() {
+                    cfg.arena_width = n as f32;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<f32>() {
+                        cfg.arena_width = n;
+                    }
+                }
+            }
+            if let Some(v) =
+                map.get("arena_height").or_else(|| map.get("arenaHeight"))
+            {
+                if let Some(n) = v.as_f64() {
+                    cfg.arena_height = n as f32;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<f32>() {
+                        cfg.arena_height = n;
+                    }
+                }
+            }
+            if let Some(v) = map
+                .get("ship_max_health")
+                .or_else(|| map.get("shipMaxHealth"))
+            {
+                if let Some(n) = v.as_f64() {
+                    cfg.ship_max_health = n as f32;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<f32>() {
+                        cfg.ship_max_health = n;
+                    }
+                }
+            }
+            if let Some(v) = map
+                .get("ship_max_energy")
+                .or_else(|| map.get("shipMaxEnergy"))
+            {
+                if let Some(n) = v.as_f64() {
+                    cfg.ship_max_energy = n as f32;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<f32>() {
+                        cfg.ship_max_energy = n;
+                    }
+                }
+            }
+            if let Some(v) =
+                map.get("bullet_damage").or_else(|| map.get("bulletDamage"))
+            {
+                if let Some(n) = v.as_f64() {
+                    cfg.bullet_damage = n as f32;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<f32>() {
+                        cfg.bullet_damage = n;
+                    }
+                }
+            }
+            if let Some(v) = map
+                .get("asteroid_damage")
+                .or_else(|| map.get("asteroidDamage"))
+            {
+                if let Some(n) = v.as_f64() {
+                    cfg.asteroid_damage = n as f32;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<f32>() {
+                        cfg.asteroid_damage = n;
+                    }
+                }
+            }
+            if let Some(v) = map
+                .get("shoot_energy_cost")
+                .or_else(|| map.get("shootEnergyCost"))
+            {
+                if let Some(n) = v.as_f64() {
+                    cfg.shoot_energy_cost = n as f32;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<f32>() {
+                        cfg.shoot_energy_cost = n;
+                    }
+                }
+            }
+            if let Some(v) = map
+                .get("shield_energy_cost_per_tick")
+                .or_else(|| map.get("shieldEnergyCostPerTick"))
+            {
+                if let Some(n) = v.as_f64() {
+                    cfg.shield_energy_cost_per_tick = n as f32;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<f32>() {
+                        cfg.shield_energy_cost_per_tick = n;
+                    }
+                }
+            }
+            if let Some(v) = map
+                .get("shield_damage_reduction")
+                .or_else(|| map.get("shieldDamageReduction"))
+            {
+                if let Some(n) = v.as_f64() {
+                    cfg.shield_damage_reduction = n as f32;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<f32>() {
+                        cfg.shield_damage_reduction = n;
+                    }
+                }
+            }
+            if let Some(v) = map
+                .get("energy_regen_per_tick")
+                .or_else(|| map.get("energyRegenPerTick"))
+            {
+                if let Some(n) = v.as_f64() {
+                    cfg.energy_regen_per_tick = n as f32;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<f32>() {
+                        cfg.energy_regen_per_tick = n;
+                    }
+                }
+            }
+            if let Some(v) =
+                map.get("radar_range").or_else(|| map.get("radarRange"))
+            {
+                if let Some(n) = v.as_f64() {
+                    cfg.radar_range = n as f32;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<f32>() {
+                        cfg.radar_range = n;
+                    }
+                }
+            }
+            if let Some(v) = map
+                .get("asteroid_count")
+                .or_else(|| map.get("asteroidCount"))
+            {
+                if let Some(n) = v.as_u64() {
+                    cfg.asteroid_count = n as u32;
+                } else if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<u32>() {
+                        cfg.asteroid_count = n;
+                    }
+                }
+            }
+            cfg
+        } else {
+            serde_json::from_value(val.clone()).unwrap_or_default()
+        }
+    }
+}
+
 #[derive(Clone, Resource)]
 pub struct Settings {
     pub seed: u64,
@@ -46,49 +268,99 @@ pub struct Settings {
     /// rivales. Agentrix lo entrega desde el manifest de Starfighter al
     /// inicializar cada partida.
     pub radar_range: f32,
+    pub config: StarfighterConfig,
 }
 
 impl Default for Settings {
     fn default() -> Self {
+        let config = StarfighterConfig::default();
         Settings {
             seed: 0,
-            tick_hz: 60.0,
+            tick_hz: config.tick_hz,
             players: 2,
-            asteroid_count: 5,
+            asteroid_count: config.asteroid_count,
             continuous_collision_detection: true,
-            radar_range: 800.0,
+            radar_range: config.radar_range,
+            config,
         }
     }
 }
 
-const ARENA_HALF_WIDTH: f32 = 1000.0;
-const ARENA_HALF_HEIGHT: f32 = 500.0;
+impl Settings {
+    #[inline]
+    pub fn arena_half_width(&self) -> f32 {
+        self.config.arena_width * 0.5
+    }
 
-/// HP inicial/máximo de cualquier nave. Placeholder de balance (Fase 1);
-/// el valor concreto lo fija un concurso real, no este archivo.
+    #[inline]
+    pub fn arena_half_height(&self) -> f32 {
+        self.config.arena_height * 0.5
+    }
+
+    #[inline]
+    pub fn ship_max_health(&self) -> f32 {
+        self.config.ship_max_health
+    }
+
+    #[inline]
+    pub fn ship_max_energy(&self) -> f32 {
+        self.config.ship_max_energy
+    }
+
+    #[inline]
+    pub fn bullet_damage(&self) -> f32 {
+        self.config.bullet_damage
+    }
+
+    #[inline]
+    pub fn asteroid_damage(&self) -> f32 {
+        self.config.asteroid_damage
+    }
+
+    #[inline]
+    pub fn shoot_energy_cost(&self) -> f32 {
+        self.config.shoot_energy_cost
+    }
+
+    #[inline]
+    pub fn shield_energy_cost_per_tick(&self) -> f32 {
+        self.config.shield_energy_cost_per_tick
+    }
+
+    #[inline]
+    pub fn shield_damage_reduction(&self) -> f32 {
+        self.config.shield_damage_reduction
+    }
+
+    #[inline]
+    pub fn energy_regen_per_tick(&self) -> f32 {
+        self.config.energy_regen_per_tick
+    }
+}
+
+pub const DEFAULT_ARENA_HALF_WIDTH: f32 = 1000.0;
+pub const DEFAULT_ARENA_HALF_HEIGHT: f32 = 500.0;
+
+/// Constantes conservadas como defaults históricos y placeholders documentales.
+#[allow(dead_code)]
+const ARENA_HALF_WIDTH: f32 = DEFAULT_ARENA_HALF_WIDTH;
+#[allow(dead_code)]
+const ARENA_HALF_HEIGHT: f32 = DEFAULT_ARENA_HALF_HEIGHT;
+#[allow(dead_code)]
 const MAX_HEALTH: f32 = 100.0;
-/// Energía inicial/máxima de cualquier nave.
+#[allow(dead_code)]
 const MAX_ENERGY: f32 = 100.0;
-/// Daño de una bala nave-a-nave antes de reducción por escudo.
+#[allow(dead_code)]
 const BULLET_DAMAGE: f32 = 25.0;
-/// Daño letal en un solo golpe contra un asteroide: esta fase se enfoca
-/// en la simetría nave-vs-nave, no en el balance del asteroide, así que
-/// se mantiene el comportamiento simple (un golpe con un asteroide
-/// destruye la nave) heredado de la Fase 0.
+#[allow(dead_code)]
 const ASTEROID_DAMAGE: f32 = MAX_HEALTH;
-/// Costo de energía por disparo. Si la nave no tiene suficiente, no
-/// dispara aunque el cooldown de la bala ya esté listo.
+#[allow(dead_code)]
 const SHOOT_ENERGY_COST: f32 = 15.0;
-/// Costo de energía por tick mientras el escudo está levantado. A 60
-/// ticks/s, mantenerlo levantado sin pausa agota el pool completo en
-/// ~1.7s — el escudo cuesta sostenerlo, no es gratis como en el diseño
-/// original (que lo daba gratis y solo al jugador 0).
+#[allow(dead_code)]
 const SHIELD_ENERGY_COST_PER_TICK: f32 = 1.0;
-/// Fracción de daño que absorbe un escudo activo (no bloqueo total: el
-/// diseño original ya reducía en vez de anular el daño con escudo).
+#[allow(dead_code)]
 const SHIELD_DAMAGE_REDUCTION: f32 = 0.7;
-/// Regeneración pasiva de energía por tick cuando no se está gastando en
-/// disparo o escudo ese mismo tick.
+#[allow(dead_code)]
 const ENERGY_REGEN_PER_TICK: f32 = 0.5;
 
 #[derive(Component)]
@@ -256,9 +528,7 @@ impl DerefMut for RngState {
 pub fn build_app(settings: Settings) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
-        .add_plugins(
-            PhysicsPlugins::default().with_length_unit(50.0),
-        )
+        .add_plugins(PhysicsPlugins::default().with_length_unit(50.0))
         .insert_resource(Time::<Fixed>::from_hz(settings.tick_hz))
         .insert_resource(Gravity(Vec2::ZERO))
         .insert_resource(RngState(SmallRng::seed_from_u64(settings.seed)))
@@ -284,22 +554,43 @@ pub fn build_app(settings: Settings) -> App {
     app
 }
 
-fn setup(settings: Res<Settings>, mut cmd: Commands, mut rng: ResMut<RngState>) {
+fn setup(
+    settings: Res<Settings>,
+    mut cmd: Commands,
+    mut rng: ResMut<RngState>,
+) {
     for i in 0..settings.players as usize {
         let angle = i as f32 / settings.players.max(1) as f32
             * std::f32::consts::PI
             * 2.0;
-        let position =
-            Vec2::new(angle.cos(), angle.sin()) * (ARENA_HALF_WIDTH * 0.6);
-        spawn_fighter(&mut cmd, i, position);
+        let position = Vec2::new(angle.cos(), angle.sin())
+            * (settings.arena_half_width() * 0.6);
+        spawn_fighter_with_settings(&mut cmd, i, position, &settings);
     }
     let _ = &mut rng; // reservado para spawns futuros no deterministas por posición fija
 }
 
-pub fn spawn_fighter(cmd: &mut Commands, player_id: usize, position: Vec2) -> Entity {
+pub fn spawn_fighter(
+    cmd: &mut Commands,
+    player_id: usize,
+    position: Vec2,
+) -> Entity {
+    spawn_fighter_with_settings(cmd, player_id, position, &Settings::default())
+}
+
+pub fn spawn_fighter_with_settings(
+    cmd: &mut Commands,
+    player_id: usize,
+    position: Vec2,
+    settings: &Settings,
+) -> Entity {
     cmd.spawn((
         Fighter {
             player_id,
+            health: settings.ship_max_health(),
+            max_health: settings.ship_max_health(),
+            energy: settings.ship_max_energy(),
+            max_energy: settings.ship_max_energy(),
             ..default()
         },
         RigidBody::Dynamic,
@@ -354,10 +645,11 @@ fn spawn_asteroids(
     mut rng: ResMut<RngState>,
 ) {
     let mut count = 0;
+    let margin_x = settings.arena_half_width() * 1.5;
+    let margin_y = settings.arena_half_height() * 1.5;
     for (entity, transform) in &asteroids {
         let p = transform.translation;
-        if p.x.abs() > ARENA_HALF_WIDTH * 1.5 || p.y.abs() > ARENA_HALF_HEIGHT * 1.5
-        {
+        if p.x.abs() > margin_x || p.y.abs() > margin_y {
             cmd.entity(entity).despawn();
         } else {
             count += 1;
@@ -367,8 +659,9 @@ fn spawn_asteroids(
         let speed = rng.gen_range(50.0..300.0);
         let direction = rng.gen_range(0.0..std::f32::consts::PI * 2.0);
         let spawn_angle = rng.gen_range(0.0..std::f32::consts::PI * 2.0);
-        let radius = (rng.gen_range(20.0..60.0_f32) * rng.gen_range(20.0..60.0_f32))
-            .sqrt();
+        let radius = (rng.gen_range(20.0..60.0_f32)
+            * rng.gen_range(20.0..60.0_f32))
+        .sqrt();
         cmd.spawn((
             Asteroid {
                 health: 2.0,
@@ -379,8 +672,8 @@ fn spawn_asteroids(
             Collider::circle(radius),
             CollisionEventsEnabled,
             Transform::from_translation(Vec3::new(
-                ARENA_HALF_WIDTH * 1.5 * spawn_angle.cos(),
-                ARENA_HALF_HEIGHT * 1.5 * spawn_angle.sin(),
+                margin_x * spawn_angle.cos(),
+                margin_y * spawn_angle.sin(),
                 0.0,
             )),
             LinearVelocity(speed * Vec2::new(direction.cos(), direction.sin())),
@@ -391,19 +684,27 @@ fn spawn_asteroids(
 }
 
 fn check_boundary_collision(
-    mut fighters: Query<(&mut LinearVelocity, &mut AngularVelocity, &Transform, &Fighter)>,
+    mut fighters: Query<(
+        &mut LinearVelocity,
+        &mut AngularVelocity,
+        &Transform,
+        &Fighter,
+    )>,
+    settings: Res<Settings>,
 ) {
+    let half_w = settings.arena_half_width();
+    let half_h = settings.arena_half_height();
     for (mut velocity, mut angular, transform, fighter) in &mut fighters {
         let x = transform.translation.x;
         let y = transform.translation.y;
-        if x > ARENA_HALF_WIDTH {
+        if x > half_w {
             velocity.x = -velocity.x.abs();
-        } else if x < -ARENA_HALF_WIDTH {
+        } else if x < -half_w {
             velocity.x = velocity.x.abs();
         }
-        if y > ARENA_HALF_HEIGHT {
+        if y > half_h {
             velocity.y = -velocity.y.abs();
-        } else if y < -ARENA_HALF_HEIGHT {
+        } else if y < -half_h {
             velocity.y = velocity.y.abs();
         }
         if !fighter.is_turning && angular.0 != 0.0 {
@@ -445,7 +746,9 @@ pub fn fighter_actions(
             Turn::Right => -fighter.turn_acceleration,
             Turn::None => 0.0,
         };
-        angular.0 = angular.0.clamp(-fighter.max_turn_speed, fighter.max_turn_speed);
+        angular.0 = angular
+            .0
+            .clamp(-fighter.max_turn_speed, fighter.max_turn_speed);
 
         let speed = vel.0.length();
         match action.thrust {
@@ -454,7 +757,8 @@ pub fn fighter_actions(
             }
             Thrust::Off => {
                 vel.0 *= 1.0
-                    - fighter.drag_coef * (speed / fighter.max_velocity).powf(fighter.drag_exp);
+                    - fighter.drag_coef
+                        * (speed / fighter.max_velocity).powf(fighter.drag_exp);
             }
             Thrust::Stop => {
                 if speed < 1.0 {
@@ -473,7 +777,10 @@ pub fn fighter_actions(
         fighter.shield_active = matches!(action.shield, Shield::On);
 
         if let Shoot::On = action.shoot {
-            if fighter.remaining_bullet_cooldown <= 0 && fighter.energy >= SHOOT_ENERGY_COST {
+            let shoot_cost = settings.shoot_energy_cost();
+            if fighter.remaining_bullet_cooldown <= 0
+                && fighter.energy >= shoot_cost
+            {
                 spawn_bullet(
                     &mut cmd,
                     &settings,
@@ -482,9 +789,12 @@ pub fn fighter_actions(
                     fighter.bullet_lifetime,
                     fighter.player_id,
                 );
-                fighter.remaining_bullet_cooldown = fighter.bullet_cooldown as i32;
-                fighter.energy -= SHOOT_ENERGY_COST;
-                events.0.push(format!("P{} fired a bullet", fighter.player_id));
+                fighter.remaining_bullet_cooldown =
+                    fighter.bullet_cooldown as i32;
+                fighter.energy -= shoot_cost;
+                events
+                    .0
+                    .push(format!("P{} fired a bullet", fighter.player_id));
             }
         }
     }
@@ -492,21 +802,26 @@ pub fn fighter_actions(
 
 fn facing_direction(transform: &Transform) -> Vec2 {
     let (_, angle) = transform.rotation.to_axis_angle();
-    let angle = if transform.rotation.z < 0.0 { -angle } else { angle }
-        + std::f32::consts::PI / 2.0;
+    let angle = if transform.rotation.z < 0.0 {
+        -angle
+    } else {
+        angle
+    } + std::f32::consts::PI / 2.0;
     Vec2::new(angle.cos(), angle.sin())
 }
 
 /// Corre para todas las naves cada tick, tengan o no un mensaje de
 /// acción ese tick: cooldown de disparo, costo de sostener el escudo, y
 /// regeneración pasiva de energía cuando no se está gastando.
-fn cooldowns(mut fighters: Query<&mut Fighter>) {
+fn cooldowns(mut fighters: Query<&mut Fighter>, settings: Res<Settings>) {
+    let shield_cost = settings.shield_energy_cost_per_tick();
+    let regen = settings.energy_regen_per_tick();
     for mut fighter in &mut fighters {
         fighter.remaining_bullet_cooldown -= 1;
 
         if fighter.shield_active {
-            if fighter.energy >= SHIELD_ENERGY_COST_PER_TICK {
-                fighter.energy -= SHIELD_ENERGY_COST_PER_TICK;
+            if fighter.energy >= shield_cost {
+                fighter.energy -= shield_cost;
             } else {
                 // Sin energía para sostenerlo: se apaga solo, simétrico
                 // para cualquier slot.
@@ -514,12 +829,15 @@ fn cooldowns(mut fighters: Query<&mut Fighter>) {
                 fighter.shield_active = false;
             }
         } else {
-            fighter.energy = (fighter.energy + ENERGY_REGEN_PER_TICK).min(fighter.max_energy);
+            fighter.energy = (fighter.energy + regen).min(fighter.max_energy);
         }
     }
 }
 
-fn expire_bullets(mut cmd: Commands, mut bullets: Query<(Entity, &mut Bullet)>) {
+fn expire_bullets(
+    mut cmd: Commands,
+    mut bullets: Query<(Entity, &mut Bullet)>,
+) {
     for (entity, mut bullet) in &mut bullets {
         bullet.remaining_lifetime -= 1;
         if bullet.remaining_lifetime <= 0 {
@@ -538,25 +856,29 @@ fn detect_collisions(
     mut asteroids: Query<&mut Asteroid>,
     mut destroyed: MessageWriter<FighterDestroyed>,
     mut events: ResMut<TickEvents>,
+    settings: Res<Settings>,
 ) {
     for event in collisions.read() {
         let (a, b) = (event.collider1, event.collider2);
-        let (Ok(ta), Ok(tb)) = (collision_type.get(a), collision_type.get(b)) else {
+        let (Ok(ta), Ok(tb)) = (collision_type.get(a), collision_type.get(b))
+        else {
             continue;
         };
         match (ta, tb) {
             (CollisionType::Fighter, CollisionType::Asteroid)
             | (CollisionType::Asteroid, CollisionType::Fighter) => {
-                let (fighter_entity, asteroid_entity) = if *ta == CollisionType::Fighter {
-                    (a, b)
-                } else {
-                    (b, a)
-                };
+                let (fighter_entity, asteroid_entity) =
+                    if *ta == CollisionType::Fighter {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    };
                 take_hit(
                     &mut cmd,
                     &mut fighters,
                     fighter_entity,
-                    ASTEROID_DAMAGE,
+                    settings.asteroid_damage(),
+                    settings.shield_damage_reduction(),
                     "an asteroid",
                     &mut destroyed,
                     &mut events,
@@ -565,11 +887,12 @@ fn detect_collisions(
             }
             (CollisionType::Bullet, CollisionType::Asteroid)
             | (CollisionType::Asteroid, CollisionType::Bullet) => {
-                let (bullet_entity, asteroid_entity) = if *ta == CollisionType::Bullet {
-                    (a, b)
-                } else {
-                    (b, a)
-                };
+                let (bullet_entity, asteroid_entity) =
+                    if *ta == CollisionType::Bullet {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    };
                 cmd.entity(bullet_entity).despawn();
                 if let Ok(mut asteroid) = asteroids.get_mut(asteroid_entity) {
                     asteroid.health -= 1.0;
@@ -580,17 +903,21 @@ fn detect_collisions(
             }
             (CollisionType::Fighter, CollisionType::Bullet)
             | (CollisionType::Bullet, CollisionType::Fighter) => {
-                let (fighter_entity, bullet_entity) = if *ta == CollisionType::Fighter {
-                    (a, b)
-                } else {
-                    (b, a)
-                };
-                let shooter = bullets.get(bullet_entity).ok().map(|b| b.player_id);
+                let (fighter_entity, bullet_entity) =
+                    if *ta == CollisionType::Fighter {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    };
+                let shooter =
+                    bullets.get(bullet_entity).ok().map(|b| b.player_id);
                 let same_owner = fighters
                     .get(fighter_entity)
                     .ok()
                     .zip(shooter)
-                    .map(|(fighter, shooter_id)| fighter.player_id == shooter_id)
+                    .map(|(fighter, shooter_id)| {
+                        fighter.player_id == shooter_id
+                    })
                     .unwrap_or(true);
                 if !same_owner {
                     let source = shooter
@@ -600,7 +927,8 @@ fn detect_collisions(
                         &mut cmd,
                         &mut fighters,
                         fighter_entity,
-                        BULLET_DAMAGE,
+                        settings.bullet_damage(),
+                        settings.shield_damage_reduction(),
                         &source,
                         &mut destroyed,
                         &mut events,
@@ -626,6 +954,7 @@ fn take_hit(
     fighters: &mut Query<&mut Fighter>,
     entity: Entity,
     damage: f32,
+    shield_reduction: f32,
     source: &str,
     destroyed: &mut MessageWriter<FighterDestroyed>,
     events: &mut TickEvents,
@@ -634,18 +963,25 @@ fn take_hit(
         return;
     };
     let effective_damage = if fighter.shield_active {
-        damage * (1.0 - SHIELD_DAMAGE_REDUCTION)
+        damage * (1.0 - shield_reduction)
     } else {
         damage
     };
     fighter.health -= effective_damage;
-    let shielded_note = if fighter.shield_active { " (shielded)" } else { "" };
+    let shielded_note = if fighter.shield_active {
+        " (shielded)"
+    } else {
+        ""
+    };
     events.0.push(format!(
         "P{} hit by {source} for {effective_damage:.1} dmg{shielded_note}",
         fighter.player_id
     ));
     if fighter.health <= 0.0 {
-        events.0.push(format!("P{} destroyed", fighter.player_id));
+        fighter.health = 0.0;
+        events
+            .0
+            .push(format!("P{} was destroyed by {source}", fighter.player_id));
         destroyed.write(FighterDestroyed {
             entity,
             player_id: fighter.player_id,
@@ -671,7 +1007,9 @@ fn check_match_end(
         result.winner = alive.first().copied();
         match result.winner {
             Some(pid) => events.0.push(format!("Match ended: P{pid} wins")),
-            None => events.0.push("Match ended in a draw (mutual destruction)".to_string()),
+            None => events
+                .0
+                .push("Match ended in a draw (mutual destruction)".to_string()),
         }
     }
 }
@@ -914,7 +1252,11 @@ mod tests {
         app.cleanup();
         app.update(); // Startup
 
-        let target = spawn_fighter(&mut app.world_mut().commands(), 0, Vec2::new(500.0, 0.0));
+        let target = spawn_fighter(
+            &mut app.world_mut().commands(),
+            0,
+            Vec2::new(500.0, 0.0),
+        );
         app.world_mut().flush();
 
         // Bala a 3000 u/s (el bullet_speed de referencia del original
@@ -1006,9 +1348,11 @@ mod tests {
                 ..default()
             };
             let mut app = build_app(settings);
-            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-                Duration::from_secs_f64(1.0 / 60.0),
-            ));
+            app.insert_resource(
+                bevy::time::TimeUpdateStrategy::ManualDuration(
+                    Duration::from_secs_f64(1.0 / 60.0),
+                ),
+            );
             app.finish();
             app.cleanup();
             app.update(); // Startup: spawnea las 2 naves
@@ -1022,7 +1366,11 @@ mod tests {
                 pairs.sort_by_key(|(id, _)| *id);
                 pairs.into_iter().map(|(_, e)| e).collect()
             };
-            assert_eq!(entities.len(), 2, "setup debe spawnear exactamente 2 naves");
+            assert_eq!(
+                entities.len(),
+                2,
+                "setup debe spawnear exactamente 2 naves"
+            );
 
             for _ in 0..MAX_TICKS {
                 let actions: Vec<FighterAction> = {
@@ -1054,8 +1402,10 @@ mod tests {
                         .collect()
                 };
                 for (entity, action) in entities.iter().zip(actions) {
-                    app.world_mut()
-                        .write_message(FighterActionMessage { action, entity: *entity });
+                    app.world_mut().write_message(FighterActionMessage {
+                        action,
+                        entity: *entity,
+                    });
                 }
 
                 app.update();
@@ -1125,7 +1475,8 @@ mod tests {
 
         let far = snapshot(1, Vec2::new(radar_range + 1.0, 0.0));
         let perception_far =
-            build_perception(0, 0, radar_range, &[me, far], &[]).expect("player 0 vive");
+            build_perception(0, 0, radar_range, &[me, far], &[])
+                .expect("player 0 vive");
         assert!(
             perception_far.rivals.is_empty(),
             "un rival a más de radar_range no debería aparecer en absoluto"
@@ -1133,7 +1484,8 @@ mod tests {
 
         let near = snapshot(1, Vec2::new(radar_range - 1.0, 0.0));
         let perception_near =
-            build_perception(0, 0, radar_range, &[me, near], &[]).expect("player 0 vive");
+            build_perception(0, 0, radar_range, &[me, near], &[])
+                .expect("player 0 vive");
         assert_eq!(
             perception_near.rivals.len(),
             1,
@@ -1156,11 +1508,16 @@ mod tests {
         rival.energy = 42.0; // valor centinela: si esto se filtra, lo vemos en el JSON
         rival.remaining_bullet_cooldown = 7;
 
-        let perception =
-            build_perception(0, 0, 800.0, &[me, rival], &[]).expect("player 0 vive");
-        assert_eq!(perception.rivals.len(), 1, "el rival debe estar dentro de rango");
+        let perception = build_perception(0, 0, 800.0, &[me, rival], &[])
+            .expect("player 0 vive");
+        assert_eq!(
+            perception.rivals.len(),
+            1,
+            "el rival debe estar dentro de rango"
+        );
 
-        let value = serde_json::to_value(&perception).expect("Perception debe serializar a JSON");
+        let value = serde_json::to_value(&perception)
+            .expect("Perception debe serializar a JSON");
         let rivals_json = value
             .get("rivals")
             .expect("la percepción debe tener el campo rivals")
@@ -1188,7 +1545,8 @@ mod tests {
             .expect("la percepción debe tener el campo myself")
             .to_string();
         assert!(
-            myself_json.contains("energy") && myself_json.contains("remaining_bullet_cooldown"),
+            myself_json.contains("energy")
+                && myself_json.contains("remaining_bullet_cooldown"),
             "myself sí debe exponer energía y cooldown propios: {myself_json}"
         );
     }
@@ -1209,20 +1567,26 @@ mod tests {
         app.update();
 
         spawn_fighter(&mut app.world_mut().commands(), 0, Vec2::new(0.0, 0.0));
-        spawn_fighter(&mut app.world_mut().commands(), 1, Vec2::new(100.0, 0.0));
+        spawn_fighter(
+            &mut app.world_mut().commands(),
+            1,
+            Vec2::new(100.0, 0.0),
+        );
         app.world_mut().flush();
         app.update();
 
         let fighters = app
             .world_mut()
             .run_system_once(
-                |q: Query<(&Fighter, &Transform, &LinearVelocity)>| collect_fighter_snapshots(&q),
+                |q: Query<(&Fighter, &Transform, &LinearVelocity)>| {
+                    collect_fighter_snapshots(&q)
+                },
             )
             .expect("run_system_once no debería fallar");
         assert_eq!(fighters.len(), 2, "deben leerse las 2 naves spawneadas");
 
-        let perception =
-            build_perception(0, 0, 800.0, &fighters, &[]).expect("player 0 debe existir");
+        let perception = build_perception(0, 0, 800.0, &fighters, &[])
+            .expect("player 0 debe existir");
         assert_eq!(perception.rivals.len(), 1);
         assert_eq!(perception.rivals[0].player_id, 1);
         // Distancia real ~100 (puede moverse levemente por un tick de física).
@@ -1270,11 +1634,14 @@ mod tests {
             let mut app = build_app(settings);
             app.finish();
             app.cleanup();
-            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-                Duration::from_secs_f64(1.0 / 60.0),
-            ));
+            app.insert_resource(
+                bevy::time::TimeUpdateStrategy::ManualDuration(
+                    Duration::from_secs_f64(1.0 / 60.0),
+                ),
+            );
             app.update(); // Startup, sin naves automáticas (players: 0)
-            let entity = spawn_fighter(&mut app.world_mut().commands(), 0, Vec2::ZERO);
+            let entity =
+                spawn_fighter(&mut app.world_mut().commands(), 0, Vec2::ZERO);
             app.world_mut().flush();
             (app, entity)
         }
@@ -1286,15 +1653,21 @@ mod tests {
                     Just(Thrust::Off),
                     Just(Thrust::Stop)
                 ],
-                prop_oneof![Just(Turn::Left), Just(Turn::Right), Just(Turn::None)],
+                prop_oneof![
+                    Just(Turn::Left),
+                    Just(Turn::Right),
+                    Just(Turn::None)
+                ],
                 any::<bool>(),
                 any::<bool>(),
             )
-                .prop_map(|(thrust, turn, shoot, shield)| FighterAction {
-                    thrust,
-                    turn,
-                    shoot: if shoot { Shoot::On } else { Shoot::Off },
-                    shield: if shield { Shield::On } else { Shield::Off },
+                .prop_map(|(thrust, turn, shoot, shield)| {
+                    FighterAction {
+                        thrust,
+                        turn,
+                        shoot: if shoot { Shoot::On } else { Shoot::Off },
+                        shield: if shield { Shield::On } else { Shield::Off },
+                    }
                 })
         }
 
@@ -1320,7 +1693,7 @@ mod tests {
                               mut fighters: Query<&mut Fighter>,
                               mut destroyed: MessageWriter<FighterDestroyed>,
                               mut events: ResMut<TickEvents>| {
-                            take_hit(&mut cmd, &mut fighters, entity, damage, "proptest", &mut destroyed, &mut events);
+                            take_hit(&mut cmd, &mut fighters, entity, damage, 0.7, "proptest", &mut destroyed, &mut events);
                         },
                     )
                     .expect("run_system_once no debería fallar");

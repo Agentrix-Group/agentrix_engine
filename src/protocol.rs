@@ -60,8 +60,10 @@ mod tests {
 
     #[test]
     fn wire_action_matches_starfighter_contract() {
-        let json = r#"{"thrust":"FORWARD","turn":"LEFT","shoot":true,"shield":false}"#;
-        let parsed: WireAction = serde_json::from_str(json).expect("debe parsear");
+        let json =
+            r#"{"thrust":"FORWARD","turn":"LEFT","shoot":true,"shield":false}"#;
+        let parsed: WireAction =
+            serde_json::from_str(json).expect("debe parsear");
         let action: FighterAction = parsed.into();
         assert_eq!(action.thrust, Thrust::On);
         assert_eq!(action.turn, Turn::Left);

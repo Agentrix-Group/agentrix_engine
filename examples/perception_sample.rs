@@ -43,6 +43,7 @@ fn main() {
 
     println!(
         "{}",
-        serde_json::to_string_pretty(&perception).expect("Perception debe serializar")
+        serde_json::to_string_pretty(&perception)
+            .expect("Perception debe serializar")
     );
 }
