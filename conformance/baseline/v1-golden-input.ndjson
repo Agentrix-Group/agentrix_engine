@@ -1,0 +1,6 @@
+{"protocolVersion":"agentrix-engine/1","type":"initialize_match","matchId":"golden-normal","sequence":1,"payload":{"matchId":"golden-normal","gameId":"starfighter","seed":7,"tickHz":60,"maxTicks":3,"players":["alpha","beta"],"config":{"asteroid_count":1}}}
+{"protocolVersion":"agentrix-engine/1","type":"advance_tick","matchId":"golden-normal","sequence":2,"payload":{"tick":0,"actions":{"alpha":{"status":"valid","payload":{"thrust":"FORWARD","turn":"NONE","shoot":true,"shield":false}},"beta":{"status":"valid","payload":{"thrust":"OFF","turn":"LEFT","shoot":false,"shield":true}}}}}
+{"protocolVersion":"agentrix-engine/1","type":"advance_tick","matchId":"golden-normal","sequence":3,"payload":{"tick":1,"actions":{"alpha":{"status":"valid","payload":{"thrust":"OFF","turn":"RIGHT","shoot":false,"shield":false}},"beta":{"status":"timeout"}}}}
+{"protocolVersion":"agentrix-engine/1","type":"advance_tick","matchId":"golden-normal","sequence":4,"payload":{"tick":2,"actions":{"alpha":{"status":"disqualified"},"beta":{"status":"disqualified"}}}}
+{"protocolVersion":"agentrix-engine/1","type":"finish_match","matchId":"golden-normal","sequence":5,"payload":{"reason":"timeout"}}
+{"protocolVersion":"agentrix-engine/1","type":"shutdown","matchId":"golden-normal","sequence":6,"payload":{}}

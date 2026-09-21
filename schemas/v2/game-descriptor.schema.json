@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentrix.dev/schemas/engine/v2/game-descriptor.schema.json",
+  "title": "Compiled game descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["key", "players", "schemas", "capabilities"],
+  "properties": {
+    "key": {"$ref": "#/$defs/gameKey"},
+    "players": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum", "maximum"],
+      "properties": {
+        "minimum": {"type": "integer", "minimum": 1, "maximum": 64},
+        "maximum": {"type": "integer", "minimum": 1, "maximum": 64}
+      }
+    },
+    "schemas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "observation", "public"],
+      "properties": {
+        "action": {"$ref": "#/$defs/sha256"},
+        "observation": {"$ref": "#/$defs/sha256"},
+        "public": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "gameKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gameId", "gameVersion", "gameDigest"],
+      "properties": {
+        "gameId": {"type": "string", "minLength": 1, "maxLength": 128},
+        "gameVersion": {"type": "string", "minLength": 1, "maxLength": 64},
+        "gameDigest": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

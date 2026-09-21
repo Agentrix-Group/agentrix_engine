@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentrix.dev/schemas/games/starfighter/0.3.0-core.1/action.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["thrust", "turn", "shoot", "shield"],
+  "properties": {
+    "thrust": {"enum": ["FORWARD", "OFF", "BRAKE"]},
+    "turn": {"enum": ["LEFT", "RIGHT", "NONE"]},
+    "shoot": {"type": "boolean"},
+    "shield": {"type": "boolean"}
+  }
+}

@@ -1,0 +1,13 @@
+[package]
+name = "agentrix-engine-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agentrix-sim-core = { path = "../sim-core" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+agentrix-conformance-game = { path = "../games/conformance-game" }
+serde_json = "1"
+

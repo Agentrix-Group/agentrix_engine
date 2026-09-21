@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentrix.dev/schemas/engine/v2/action-batch.schema.json",
+  "title": "Canonical action outcomes for one tick",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tick", "actions"],
+  "properties": {
+    "tick": {"type": "integer", "minimum": 0},
+    "actions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "requested", "applied", "policyDecision", "errorCode"],
+        "properties": {
+          "status": {"enum": ["valid", "timeout", "invalid_output", "crashed", "disqualified"]},
+          "requested": {},
+          "applied": {},
+          "policyDecision": {"type": "string", "minLength": 1},
+          "errorCode": {"type": ["string", "null"]}
+        }
+      }
+    }
+  }
+}

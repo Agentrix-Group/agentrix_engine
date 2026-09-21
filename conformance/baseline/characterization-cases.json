@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "agentrix-characterization-corpus/1",
+  "sourceCommit": "239f236099347df013d818144164541d0d433476",
+  "cases": [
+    {
+      "id": "normal-actions-seed-7",
+      "seed": 7,
+      "config": {"asteroid_count": 1, "tick_hz": 60},
+      "actions": ["thrust+shoot", "turn+shield", "noop"],
+      "evidence": "v1-golden-summary.json"
+    },
+    {
+      "id": "ccd-fast-bullet",
+      "seed": 0,
+      "config": {"asteroid_count": 0, "continuous_collision_detection": true},
+      "expected": "bullet at 3000 units/s collides with fighter",
+      "evidence": "tests::fast_bullet_does_not_tunnel_through_fighter"
+    },
+    {
+      "id": "boundary-randomized",
+      "seedRange": [0, 255],
+      "expected": "velocity reflects toward arena; no runaway divergence",
+      "evidence": "tests::proptests::boundary_reflection_prevents_runaway_divergence"
+    },
+    {
+      "id": "timeout-and-double-disqualification",
+      "seed": 42,
+      "expected": "single DQ selects opponent; simultaneous DQ has no winner",
+      "evidence": "envelope_engine_integration protocol tests"
+    },
+    {
+      "id": "invalid-action-contract",
+      "expected": "missing, malformed, unknown control and unknown field are rejected",
+      "evidence": "protocol::tests"
+    },
+    {
+      "id": "tick-limit",
+      "seed": 19,
+      "maxTicks": 8,
+      "expected": "action N produces state N+1 and terminal at exact limit",
+      "evidence": "starfighter-0.3.0-core.1.json"
+    }
+  ]
+}

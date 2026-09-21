@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentrix.dev/schemas/engine/v2/frame.schema.json",
+  "title": "Committed simulation frame",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tick", "publicSnapshot", "observations", "events", "terminal", "result", "commitments"],
+  "properties": {
+    "tick": {"type": "integer", "minimum": 0},
+    "publicSnapshot": {},
+    "observations": {"type": "object"},
+    "events": {"type": "array"},
+    "terminal": {"type": "boolean"},
+    "result": {},
+    "commitments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executionSpecDigest", "actionBatchDigest", "authoritativeStateCommitment", "publicSnapshotHash", "replayChainDigest"],
+      "properties": {
+        "executionSpecDigest": {"$ref": "#/$defs/sha256"},
+        "actionBatchDigest": {"$ref": "#/$defs/sha256"},
+        "authoritativeStateCommitment": {"$ref": "#/$defs/sha256"},
+        "publicSnapshotHash": {"$ref": "#/$defs/sha256"},
+        "replayChainDigest": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

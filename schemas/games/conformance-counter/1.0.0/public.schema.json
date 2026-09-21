@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentrix.dev/schemas/games/conformance-counter/1.0.0/public.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "tick", "counters"],
+  "properties": {
+    "schemaVersion": {"const": "conformance-public/1"},
+    "tick": {"type": "integer", "minimum": 0},
+    "counters": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+  }
+}

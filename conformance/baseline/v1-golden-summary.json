@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "agentrix-baseline-evidence/1",
+  "capturedAt": "2026-09-21",
+  "engineCommit": "239f236099347df013d818144164541d0d433476",
+  "platformCommit": "adc732f1e52c91028f4da77a8763b99eb01096f8",
+  "toolchain": {
+    "rustc": "1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "1.98.1 (797e8a9bc 2026-08-05)",
+    "target": "x86_64-unknown-linux-gnu"
+  },
+  "goldenRun": {
+    "matchId": "golden-normal",
+    "seed": 7,
+    "players": ["alpha", "beta"],
+    "ticks": 3,
+    "stateHashes": [
+      "dc6237120b2667174795236ce53b237f1fb38b163f70580e7a3a707f6a975cda",
+      "609ce0ebc29a6b209e699c81878a5944bb081c3bae2e1eb7464e301769a790ac",
+      "0c88ea8fa9799ffb98480d9ae88552aba66c3e9c1d86fb7a2e3415a0673f6683",
+      "52ef67507d618d3d0e7c6fe45bc2156606d8b5ee3b91426011913204e0a9245a"
+    ],
+    "terminalReason": "timeout",
+    "winner": null
+  },
+  "performance": {
+    "sample": "100 fresh matches, 20 ticks each, release build",
+    "latencyMilliseconds": {
+      "p50": 8.594108,
+      "p95": 9.313596,
+      "p99": 9.420792
+    },
+    "meanStdoutBytesPerTick": 1317.63,
+    "peakRssKiB": 19900,
+    "peakRssSampleTicks": 10000
+  },
+  "rustBaseline": {
+    "format": "pass",
+    "clippyAllTargetsAllFeaturesDenyWarnings": "pass",
+    "unitAndProperty": {"passed": 11, "failed": 0, "ignored": 1},
+    "protocolSubprocess": {"passed": 8, "failed": 0},
+    "releaseBuild": "pass"
+  },
+  "goBaseline": {
+    "srcEngine": "pass",
+    "srcExecutor": "fail_in_restricted_environment",
+    "executorFailureClass": "sandboxed Python processes disconnect; matches repository AGENTS.md known limitation"
+  }
+}

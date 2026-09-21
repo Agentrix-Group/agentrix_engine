@@ -1,0 +1,16 @@
+[package]
+name = "agentrix-conformance-runner"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "agentrix-conformance-vector"
+path = "src/main.rs"
+
+[dependencies]
+agentrix-sim-core = { path = "../../crates/sim-core" }
+agentrix-engine-host = { path = "../../crates/engine-host" }
+agentrix-conformance-game = { path = "../../crates/games/conformance-game" }
+bevy-starfighter = { path = "../.." }
+serde_json = "1"
+

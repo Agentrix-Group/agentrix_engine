@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentrix.dev/schemas/games/starfighter/0.3.0-core.1/public.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "tick", "fighters", "bullets", "events"],
+  "properties": {
+    "schemaVersion": {"const": "starfighter-public/1"},
+    "tick": {"type": "integer", "minimum": 0},
+    "fighters": {"type": "array", "items": {"$ref": "#/$defs/fighter"}},
+    "bullets": {"type": "array", "items": {"$ref": "#/$defs/bullet"}},
+    "events": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {"x": {"type": "number"}, "y": {"type": "number"}}
+    },
+    "fighter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entityId", "slot", "position", "velocity", "rotation", "angularVelocity", "health", "shieldActive"],
+      "properties": {
+        "entityId": {"type": "integer", "minimum": 1},
+        "slot": {"type": "string", "minLength": 1},
+        "position": {"$ref": "#/$defs/vector"},
+        "velocity": {"$ref": "#/$defs/vector"},
+        "rotation": {"type": "number"},
+        "angularVelocity": {"type": "number"},
+        "health": {"type": "number"},
+        "shieldActive": {"type": "boolean"}
+      }
+    },
+    "bullet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entityId", "slot", "position", "velocity"],
+      "properties": {
+        "entityId": {"type": "integer", "minimum": 1},
+        "slot": {"type": "string", "minLength": 1},
+        "position": {"$ref": "#/$defs/vector"},
+        "velocity": {"$ref": "#/$defs/vector"}
+      }
+    }
+  }
+}

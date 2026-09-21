@@ -1,9 +1,8 @@
 [toolchain]
-# "stable" instead of a pinned version: bevy 0.19 / avian2d 0.7 (Fase 0 of
-# the Agentrix migration) need a far newer compiler than the 1.65.0 this
-# repo was pinned to since 2022 -- pinning to a specific new version would
-# just repeat the same staleness problem down the line.
-channel = "stable"
+# Phase 0 product baseline. Release and conformance evidence is tied to this
+# exact compiler; upgrades are explicit compatibility cuts, never silent moves
+# of the `stable` alias.
+channel = "1.98.1"
 targets = [
     "x86_64-unknown-linux-gnu",
     "x86_64-apple-darwin",

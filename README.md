@@ -1,16 +1,30 @@
-# Agentrix Starfighter Engine
+# Agentrix Engine
 
-Motor autoritativo headless de Starfighter para Agentrix. Está escrito en Rust
-con Bevy y Avian2D y se comunica con el worker Go mediante JSON Lines por
-`stdin/stdout`.
+Workspace del motor autoritativo headless de Agentrix. Starfighter continúa
+usando Bevy y Avian2D; un juego discreto de conformidad prueba la frontera
+multi-juego sin introducir otro backend físico.
+
+## Capas compilables
+
+- `crates/sim-core`: contratos in-process, razón de tick, RNG portable,
+  codificación canónica y commitments separados; no depende de Bevy ni IPC.
+- `crates/engine-host`: registry y lifecycle genéricos sobre payloads opacos;
+  no importa tipos de Starfighter.
+- `crates/games/conformance-game`: segundo juego mínimo sin física.
+- crate raíz `bevy-starfighter`: reglas y física Avian2D de Starfighter y el
+  adaptador temporal del protocolo v1.
+- `bins/conformance-runner`: vectores D1/D2 ejecutables en procesos limpios.
 
 ## Responsabilidades actuales
 
 - Inicializa una partida a partir de semilla, timestep, participantes, límite
   de ticks y `radar_range` opcional.
 - Aplica acciones de Starfighter y avanza `Action[N] -> State[N+1]`.
-- Produce percepciones privadas, eventos, snapshot público y `stateHash`.
+- Produce percepciones privadas, eventos, snapshot público y `stateHash` en el
+  adaptador v1.
 - Consolida causa de término, ganador, puntuaciones y hash final.
+- En el camino `sim-core`, calcula por separado digest de spec, acciones,
+  estado autoritativo, snapshot público y cadena de evidencia.
 
 El motor no ejecuta bots, no accede a PostgreSQL y no escribe el replay de
 Agentrix. Algunas reglas y parámetros competitivos todavía son constantes del
@@ -44,33 +58,33 @@ Una acción válida tiene esta forma:
 esquemas y la documentación completa del contrato están en
 `Agentrix/protocol/engine/v1/`.
 
-La implementación aún no valida exhaustivamente la versión, secuencia e
-identidad de cada mensaje entrante. Esa brecha debe cerrarse antes de certificar
-el protocolo.
+El protocolo v1 permanece activo deliberadamente durante este checkpoint. Los
+schemas v2 están versionados en `schemas/`, pero todavía no son el transporte
+Rust↔Go; esa migración corresponde a la fase siguiente y debe ser atómica con
+el consumidor Go.
 
 ## Frecuencia y determinismo
 
-El objetivo aprobado es **60 Hz exactos**. El contrato actual recibe
-`fixedTimestepMs` como entero y Agentrix todavía envía `17` ms, equivalente a
-aproximadamente 58.82 Hz. Esa divergencia está documentada y no se considera
-resuelta por este cambio editorial.
+El core representa el tiempo con `TickRate { numerator, denominator }`; `60/1`
+es una única autoridad exacta. El adaptador v1 todavía acepta sus campos
+históricos hasta la migración coordinada de protocolo.
 
-El hash encadenado ayuda a detectar divergencias. No constituye por sí solo una
-certificación de determinismo entre arquitecturas. El futuro sim-core, Gym, un
-segundo juego y la evaluación Avian/Rapier están fuera del MVP actual.
+El tier certificado por el corpus actual es D1/D2 para el mismo artefacto y
+target Linux x86_64. No se afirma igualdad entre arquitecturas. Gym y la
+evaluación Avian/Rapier siguen fuera de este corte.
 
 ## Compilación y pruebas
 
 Sin descargar o actualizar dependencias:
 
 ```bash
-cargo test --locked --offline
-cargo build --locked --offline --release --bin starfighter-engine
+cargo test --workspace --all-targets --locked --offline
+cargo clippy --workspace --all-targets --all-features --locked --offline -- -D warnings
+cargo build --workspace --locked --offline --release
 ```
 
-El binario se genera en `target/release/starfighter-engine`. El repositorio
-principal lo instala en `bin/starfighter-engine`; `AGENTRIX_ENGINE_BIN` puede
-indicar otra ruta al ejecutar Agentrix.
+El binario IPC compatible se genera en `target/release/starfighter-engine`. El
+runner de certificación se genera como `agentrix-conformance-vector`.
 
 ## Relación con Agentrix
 

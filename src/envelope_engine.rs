@@ -120,6 +120,10 @@ fn default_action() -> FighterAction {
     }
 }
 
+pub(crate) fn neutral_action_for_core() -> FighterAction {
+    default_action()
+}
+
 #[derive(Debug, Deserialize)]
 struct AdvanceTickRequest {
     #[allow(dead_code)]
@@ -271,6 +275,37 @@ fn read_snapshots(
         })
         .expect("run_system_once no debería fallar leyendo balas");
     (fighters, bullets)
+}
+
+pub(crate) fn read_snapshots_for_core(
+    app: &mut App,
+) -> Result<
+    (Vec<crate::FighterSnapshot>, Vec<crate::BulletSnapshot>),
+    agentrix_sim_core::SimError,
+> {
+    let fighters = app
+        .world_mut()
+        .run_system_once(|q: Query<(&Fighter, &Transform, &LinearVelocity)>| {
+            collect_fighter_snapshots(&q)
+        })
+        .map_err(|error| {
+            agentrix_sim_core::SimError::new(
+                "fighter_snapshot_query_failed",
+                format!("{error:?}"),
+            )
+        })?;
+    let bullets = app
+        .world_mut()
+        .run_system_once(|q: Query<(&Bullet, &Transform, &LinearVelocity)>| {
+            collect_bullet_snapshots(&q)
+        })
+        .map_err(|error| {
+            agentrix_sim_core::SimError::new(
+                "bullet_snapshot_query_failed",
+                format!("{error:?}"),
+            )
+        })?;
+    Ok((fighters, bullets))
 }
 
 fn build_all_perceptions(

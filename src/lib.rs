@@ -16,14 +16,14 @@
 //! la Fase 1 es que sean **iguales para todos los slots** — no hay
 //! ninguna rama por `player_id` en todo este archivo.
 
+use agentrix_sim_core::{DeterministicRng, StableEntityId};
 use avian2d::prelude::*;
 use bevy::prelude::*;
-use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 
 pub mod envelope_engine;
+pub mod game_module;
 pub mod protocol;
 
 /// Inicializa `tracing` para escribir a **stderr**, nunca a stdout.
@@ -425,6 +425,34 @@ pub struct Asteroid {
     pub radius: f32,
 }
 
+/// Logical identity used by canonical state and future public snapshots.
+/// Bevy's generational `Entity` is deliberately never persisted or hashed.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EntityId(pub StableEntityId);
+
+#[derive(Resource, Debug)]
+pub struct EntityIdAllocator {
+    next: u64,
+}
+
+impl Default for EntityIdAllocator {
+    fn default() -> Self {
+        Self { next: 1_000_000 }
+    }
+}
+
+impl EntityIdAllocator {
+    fn allocate(&mut self) -> StableEntityId {
+        let id = StableEntityId(self.next);
+        self.next = self.next.saturating_add(1);
+        id
+    }
+
+    pub fn next_id(&self) -> u64 {
+        self.next
+    }
+}
+
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollisionType {
     Fighter,
@@ -507,17 +535,17 @@ pub struct MatchResult {
 pub struct TickEvents(pub Vec<String>);
 
 #[derive(Resource)]
-pub struct RngState(pub SmallRng);
+pub struct RngState(pub DeterministicRng);
 
 impl Deref for RngState {
-    type Target = SmallRng;
-    fn deref(&self) -> &SmallRng {
+    type Target = DeterministicRng;
+    fn deref(&self) -> &DeterministicRng {
         &self.0
     }
 }
 
 impl DerefMut for RngState {
-    fn deref_mut(&mut self) -> &mut SmallRng {
+    fn deref_mut(&mut self) -> &mut DeterministicRng {
         &mut self.0
     }
 }
@@ -531,7 +559,8 @@ pub fn build_app(settings: Settings) -> App {
         .add_plugins(PhysicsPlugins::default().with_length_unit(50.0))
         .insert_resource(Time::<Fixed>::from_hz(settings.tick_hz))
         .insert_resource(Gravity(Vec2::ZERO))
-        .insert_resource(RngState(SmallRng::seed_from_u64(settings.seed)))
+        .insert_resource(RngState(DeterministicRng::from_seed(settings.seed)))
+        .init_resource::<EntityIdAllocator>()
         .init_resource::<MatchResult>()
         .init_resource::<TickEvents>()
         .add_message::<FighterActionMessage>()
@@ -593,6 +622,7 @@ pub fn spawn_fighter_with_settings(
             max_energy: settings.ship_max_energy(),
             ..default()
         },
+        EntityId(StableEntityId(player_id as u64 + 1)),
         RigidBody::Dynamic,
         Collider::convex_hull(vec![
             Vec2::new(0.0, 25.0),
@@ -618,12 +648,14 @@ pub fn spawn_bullet(
     velocity: Vec2,
     lifetime: u32,
     player_id: usize,
+    stable_id: StableEntityId,
 ) {
     let mut entity = cmd.spawn((
         Bullet {
             remaining_lifetime: lifetime as i32,
             player_id,
         },
+        EntityId(stable_id),
         RigidBody::Dynamic,
         Collider::circle(3.0),
         LockedAxes::ROTATION_LOCKED,
@@ -643,6 +675,7 @@ fn spawn_asteroids(
     mut cmd: Commands,
     asteroids: Query<(Entity, &Transform), With<Asteroid>>,
     mut rng: ResMut<RngState>,
+    mut ids: ResMut<EntityIdAllocator>,
 ) {
     let mut count = 0;
     let margin_x = settings.arena_half_width() * 1.5;
@@ -656,17 +689,18 @@ fn spawn_asteroids(
         }
     }
     while count < settings.asteroid_count {
-        let speed = rng.gen_range(50.0..300.0);
-        let direction = rng.gen_range(0.0..std::f32::consts::PI * 2.0);
-        let spawn_angle = rng.gen_range(0.0..std::f32::consts::PI * 2.0);
-        let radius = (rng.gen_range(20.0..60.0_f32)
-            * rng.gen_range(20.0..60.0_f32))
+        let speed = 50.0 + 250.0 * rng.unit_f32();
+        let direction = std::f32::consts::TAU * rng.unit_f32();
+        let spawn_angle = std::f32::consts::TAU * rng.unit_f32();
+        let radius = ((20.0 + 40.0 * rng.unit_f32())
+            * (20.0 + 40.0 * rng.unit_f32()))
         .sqrt();
         cmd.spawn((
             Asteroid {
                 health: 2.0,
                 radius,
             },
+            EntityId(ids.allocate()),
             RigidBody::Dynamic,
             LockedAxes::ROTATION_LOCKED,
             Collider::circle(radius),
@@ -729,6 +763,7 @@ pub fn fighter_actions(
     mut cmd: Commands,
     settings: Res<Settings>,
     mut events: ResMut<TickEvents>,
+    mut ids: ResMut<EntityIdAllocator>,
 ) {
     for FighterActionMessage { action, entity } in actions.read() {
         let Ok((mut fighter, transform, mut vel, mut angular, mut force)) =
@@ -781,6 +816,7 @@ pub fn fighter_actions(
             if fighter.remaining_bullet_cooldown <= 0
                 && fighter.energy >= shoot_cost
             {
+                let bullet_id = ids.allocate();
                 spawn_bullet(
                     &mut cmd,
                     &settings,
@@ -788,6 +824,7 @@ pub fn fighter_actions(
                     vel.0 + facing * fighter.bullet_speed,
                     fighter.bullet_lifetime,
                     fighter.player_id,
+                    bullet_id,
                 );
                 fighter.remaining_bullet_cooldown =
                     fighter.bullet_cooldown as i32;
@@ -1270,6 +1307,7 @@ mod tests {
             Vec2::new(3000.0, 0.0),
             600,
             1,
+            StableEntityId(1_000_000),
         );
         app.world_mut().flush();
 
@@ -1378,22 +1416,34 @@ mod tests {
                     entities
                         .iter()
                         .map(|_| FighterAction {
-                            thrust: match rng.gen_range(0..3) {
+                            thrust: match rng
+                                .range_u32(0, 3)
+                                .expect("valid test range")
+                            {
                                 0 => Thrust::On,
                                 1 => Thrust::Off,
                                 _ => Thrust::Stop,
                             },
-                            turn: match rng.gen_range(0..3) {
+                            turn: match rng
+                                .range_u32(0, 3)
+                                .expect("valid test range")
+                            {
                                 0 => Turn::Left,
                                 1 => Turn::Right,
                                 _ => Turn::None,
                             },
-                            shoot: if rng.gen_bool(0.85) {
+                            shoot: if rng
+                                .probability(0.85)
+                                .expect("valid probability")
+                            {
                                 Shoot::On
                             } else {
                                 Shoot::Off
                             },
-                            shield: if rng.gen_bool(0.2) {
+                            shield: if rng
+                                .probability(0.2)
+                                .expect("valid probability")
+                            {
                                 Shield::On
                             } else {
                                 Shield::Off
@@ -1816,6 +1866,7 @@ mod tests {
                     Vec2::new(bullet_speed, 0.0),
                     600,
                     1,
+                    StableEntityId(1_000_000),
                 );
                 app.world_mut().flush();
 

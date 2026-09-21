@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentrix.dev/schemas/engine/v2/execution-spec.schema.json",
+  "title": "Agentrix ExecutionSpec v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "runId",
+    "matchId",
+    "engineDigest",
+    "buildIdentity",
+    "target",
+    "game",
+    "schemaDigests",
+    "config",
+    "configDigest",
+    "tickRate",
+    "seed",
+    "slots",
+    "limits",
+    "failurePolicyVersion",
+    "determinismTier",
+    "rngAlgorithm"
+  ],
+  "properties": {
+    "runId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "matchId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "engineDigest": {"$ref": "#/$defs/sha256"},
+    "buildIdentity": {"type": "string", "minLength": 1, "maxLength": 256},
+    "target": {"type": "string", "minLength": 1, "maxLength": 128},
+    "game": {"$ref": "game-descriptor.schema.json#/$defs/gameKey"},
+    "schemaDigests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "observation", "public", "replay"],
+      "properties": {
+        "action": {"$ref": "#/$defs/sha256"},
+        "observation": {"$ref": "#/$defs/sha256"},
+        "public": {"$ref": "#/$defs/sha256"},
+        "replay": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "config": {"type": "object"},
+    "configDigest": {"$ref": "#/$defs/sha256"},
+    "tickRate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["numerator", "denominator"],
+      "properties": {
+        "numerator": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "denominator": {"type": "integer", "minimum": 1, "maximum": 10000}
+      }
+    },
+    "seed": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+    "slots": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slotId", "artifactDigest"],
+        "properties": {
+          "slotId": {"type": "string", "minLength": 1, "maxLength": 128},
+          "artifactDigest": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxTicks", "maxPlayers", "maxEntities", "maxMessageBytes"],
+      "properties": {
+        "maxTicks": {"type": "integer", "minimum": 1},
+        "maxPlayers": {"type": "integer", "minimum": 1, "maximum": 64},
+        "maxEntities": {"type": "integer", "minimum": 1},
+        "maxMessageBytes": {"type": "integer", "minimum": 1024}
+      }
+    },
+    "failurePolicyVersion": {"type": "string", "minLength": 1},
+    "determinismTier": {
+      "enum": ["same_artifact_same_target", "certified_target_matrix"]
+    },
+    "rngAlgorithm": {"const": "xoshiro256starstar/1"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
