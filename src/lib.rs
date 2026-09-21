@@ -35,49 +35,31 @@ pub fn init_tracing() {
         .try_init();
 }
 
-/// Configuración autoritativa del juego Starfighter. Define todos los
-/// parámetros ajustables de simulación, combate y dimensiones de arena.
+/// Configuración autoritativa del juego Starfighter. Agentrix la sella en el
+/// ExecutionSpec y la envía completa en `initialize_match`: toda clave es
+/// obligatoria y una clave desconocida es un error (no hay valores por
+/// defecto silenciosos). La frecuencia de simulación no forma parte de la
+/// configuración: llega como `tickRate` racional.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct StarfighterConfig {
-    #[serde(rename = "tick_hz", alias = "tickHz")]
-    pub tick_hz: f64,
-    #[serde(rename = "arena_width", alias = "arenaWidth")]
     pub arena_width: f32,
-    #[serde(rename = "arena_height", alias = "arenaHeight")]
     pub arena_height: f32,
-    #[serde(rename = "ship_max_health", alias = "shipMaxHealth")]
     pub ship_max_health: f32,
-    #[serde(rename = "ship_max_energy", alias = "shipMaxEnergy")]
     pub ship_max_energy: f32,
-    #[serde(rename = "bullet_damage", alias = "bulletDamage")]
     pub bullet_damage: f32,
-    #[serde(rename = "asteroid_damage", alias = "asteroidDamage")]
     pub asteroid_damage: f32,
-    #[serde(rename = "shoot_energy_cost", alias = "shootEnergyCost")]
     pub shoot_energy_cost: f32,
-    #[serde(
-        rename = "shield_energy_cost_per_tick",
-        alias = "shieldEnergyCostPerTick"
-    )]
     pub shield_energy_cost_per_tick: f32,
-    #[serde(
-        rename = "shield_damage_reduction",
-        alias = "shieldDamageReduction"
-    )]
     pub shield_damage_reduction: f32,
-    #[serde(rename = "energy_regen_per_tick", alias = "energyRegenPerTick")]
     pub energy_regen_per_tick: f32,
-    #[serde(rename = "radar_range", alias = "radarRange")]
     pub radar_range: f32,
-    #[serde(rename = "asteroid_count", alias = "asteroidCount")]
     pub asteroid_count: u32,
 }
 
 impl Default for StarfighterConfig {
     fn default() -> Self {
         StarfighterConfig {
-            tick_hz: 60.0,
             arena_width: 2000.0,
             arena_height: 1000.0,
             ship_max_health: 100.0,
@@ -95,165 +77,90 @@ impl Default for StarfighterConfig {
 }
 
 impl StarfighterConfig {
-    pub fn from_value_or_default(val: &Option<serde_json::Value>) -> Self {
-        let Some(val) = val else {
-            return Self::default();
-        };
-        if let serde_json::Value::Object(map) = val {
-            let mut cfg = Self::default();
-            if let Some(v) = map.get("tick_hz").or_else(|| map.get("tickHz")) {
-                if let Some(n) = v.as_f64() {
-                    cfg.tick_hz = n;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<f64>() {
-                        cfg.tick_hz = n;
-                    }
-                }
+    /// Decodifica y valida la configuración recibida del ExecutionSpec.
+    pub fn from_value(val: &serde_json::Value) -> Result<Self, String> {
+        let cfg: StarfighterConfig = serde_json::from_value(val.clone())
+            .map_err(|e| format!("invalid starfighter config: {e}"))?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let positive = [
+            ("arena_width", self.arena_width),
+            ("arena_height", self.arena_height),
+            ("ship_max_health", self.ship_max_health),
+            ("ship_max_energy", self.ship_max_energy),
+            ("radar_range", self.radar_range),
+        ];
+        for (name, value) in positive {
+            if !(value.is_finite() && value > 0.0) {
+                return Err(format!("{name} must be a positive finite number"));
             }
-            if let Some(v) =
-                map.get("arena_width").or_else(|| map.get("arenaWidth"))
-            {
-                if let Some(n) = v.as_f64() {
-                    cfg.arena_width = n as f32;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<f32>() {
-                        cfg.arena_width = n;
-                    }
-                }
-            }
-            if let Some(v) =
-                map.get("arena_height").or_else(|| map.get("arenaHeight"))
-            {
-                if let Some(n) = v.as_f64() {
-                    cfg.arena_height = n as f32;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<f32>() {
-                        cfg.arena_height = n;
-                    }
-                }
-            }
-            if let Some(v) = map
-                .get("ship_max_health")
-                .or_else(|| map.get("shipMaxHealth"))
-            {
-                if let Some(n) = v.as_f64() {
-                    cfg.ship_max_health = n as f32;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<f32>() {
-                        cfg.ship_max_health = n;
-                    }
-                }
-            }
-            if let Some(v) = map
-                .get("ship_max_energy")
-                .or_else(|| map.get("shipMaxEnergy"))
-            {
-                if let Some(n) = v.as_f64() {
-                    cfg.ship_max_energy = n as f32;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<f32>() {
-                        cfg.ship_max_energy = n;
-                    }
-                }
-            }
-            if let Some(v) =
-                map.get("bullet_damage").or_else(|| map.get("bulletDamage"))
-            {
-                if let Some(n) = v.as_f64() {
-                    cfg.bullet_damage = n as f32;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<f32>() {
-                        cfg.bullet_damage = n;
-                    }
-                }
-            }
-            if let Some(v) = map
-                .get("asteroid_damage")
-                .or_else(|| map.get("asteroidDamage"))
-            {
-                if let Some(n) = v.as_f64() {
-                    cfg.asteroid_damage = n as f32;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<f32>() {
-                        cfg.asteroid_damage = n;
-                    }
-                }
-            }
-            if let Some(v) = map
-                .get("shoot_energy_cost")
-                .or_else(|| map.get("shootEnergyCost"))
-            {
-                if let Some(n) = v.as_f64() {
-                    cfg.shoot_energy_cost = n as f32;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<f32>() {
-                        cfg.shoot_energy_cost = n;
-                    }
-                }
-            }
-            if let Some(v) = map
-                .get("shield_energy_cost_per_tick")
-                .or_else(|| map.get("shieldEnergyCostPerTick"))
-            {
-                if let Some(n) = v.as_f64() {
-                    cfg.shield_energy_cost_per_tick = n as f32;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<f32>() {
-                        cfg.shield_energy_cost_per_tick = n;
-                    }
-                }
-            }
-            if let Some(v) = map
-                .get("shield_damage_reduction")
-                .or_else(|| map.get("shieldDamageReduction"))
-            {
-                if let Some(n) = v.as_f64() {
-                    cfg.shield_damage_reduction = n as f32;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<f32>() {
-                        cfg.shield_damage_reduction = n;
-                    }
-                }
-            }
-            if let Some(v) = map
-                .get("energy_regen_per_tick")
-                .or_else(|| map.get("energyRegenPerTick"))
-            {
-                if let Some(n) = v.as_f64() {
-                    cfg.energy_regen_per_tick = n as f32;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<f32>() {
-                        cfg.energy_regen_per_tick = n;
-                    }
-                }
-            }
-            if let Some(v) =
-                map.get("radar_range").or_else(|| map.get("radarRange"))
-            {
-                if let Some(n) = v.as_f64() {
-                    cfg.radar_range = n as f32;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<f32>() {
-                        cfg.radar_range = n;
-                    }
-                }
-            }
-            if let Some(v) = map
-                .get("asteroid_count")
-                .or_else(|| map.get("asteroidCount"))
-            {
-                if let Some(n) = v.as_u64() {
-                    cfg.asteroid_count = n as u32;
-                } else if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<u32>() {
-                        cfg.asteroid_count = n;
-                    }
-                }
-            }
-            cfg
-        } else {
-            serde_json::from_value(val.clone()).unwrap_or_default()
         }
+        let non_negative = [
+            ("bullet_damage", self.bullet_damage),
+            ("asteroid_damage", self.asteroid_damage),
+            ("shoot_energy_cost", self.shoot_energy_cost),
+            (
+                "shield_energy_cost_per_tick",
+                self.shield_energy_cost_per_tick,
+            ),
+            ("energy_regen_per_tick", self.energy_regen_per_tick),
+        ];
+        for (name, value) in non_negative {
+            if !(value.is_finite() && value >= 0.0) {
+                return Err(format!(
+                    "{name} must be a non-negative finite number"
+                ));
+            }
+        }
+        if !(0.0..=1.0).contains(&self.shield_damage_reduction) {
+            return Err("shield_damage_reduction must be within [0, 1]".into());
+        }
+        Ok(())
+    }
+}
+
+/// Frecuencia exacta de simulación como razón (ticks por segundo =
+/// numerator / denominator). Es la única fuente de verdad del paso de
+/// tiempo: motor, replay y gym derivan su timestep de este valor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TickRate {
+    pub numerator: u32,
+    pub denominator: u32,
+}
+
+impl TickRate {
+    pub const SIXTY_HZ: TickRate = TickRate {
+        numerator: 60,
+        denominator: 1,
+    };
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.numerator == 0
+            || self.denominator == 0
+            || self.numerator > 1000
+            || self.denominator > 1000
+        {
+            return Err(
+                "tickRate must be a positive ratio within 1..=1000".into()
+            );
+        }
+        Ok(())
+    }
+
+    /// Ticks por segundo.
+    pub fn hz(&self) -> f64 {
+        self.numerator as f64 / self.denominator as f64
+    }
+
+    /// Duración de un tick derivada de la razón, idéntica en todo consumidor.
+    pub fn step(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(
+            self.denominator as f64 / self.numerator as f64,
+        )
     }
 }
 
@@ -276,7 +183,7 @@ impl Default for Settings {
         let config = StarfighterConfig::default();
         Settings {
             seed: 0,
-            tick_hz: config.tick_hz,
+            tick_hz: TickRate::SIXTY_HZ.hz(),
             players: 2,
             asteroid_count: config.asteroid_count,
             continuous_collision_detection: true,

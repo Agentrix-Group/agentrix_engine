@@ -44,7 +44,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
-use std::time::Duration;
 
 pub const PROTOCOL_VERSION: &str = "agentrix-engine/1";
 
@@ -71,23 +70,107 @@ struct Envelope {
     payload: Value,
 }
 
+/// Payload canónico de `initialize_match`. Cualquier campo desconocido o
+/// faltante es un error: el motor no rellena valores por defecto.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InitializeMatchRequest {
     #[serde(rename = "matchId")]
     match_id: String,
-    #[serde(rename = "gameId", default)]
-    #[allow(dead_code)]
+    #[serde(rename = "gameId")]
     game_id: String,
+    #[serde(rename = "gameVersion")]
+    game_version: String,
+    #[serde(rename = "expectedEngineVersion")]
+    expected_engine_version: String,
     seed: i64,
-    #[serde(rename = "fixedTimestepMs", default)]
-    fixed_timestep_ms: i64,
-    #[serde(rename = "tickHz", default)]
-    tick_hz: Option<f64>,
+    #[serde(rename = "tickRate")]
+    tick_rate: crate::TickRate,
     #[serde(rename = "maxTicks")]
     max_ticks: i64,
     players: Vec<String>,
-    #[serde(default)]
-    config: Option<Value>,
+    config: Value,
+    #[serde(rename = "participantArtifactDigests")]
+    participant_artifact_digests: BTreeMap<String, String>,
+}
+
+impl InitializeMatchRequest {
+    fn validate(
+        &self,
+    ) -> Result<crate::StarfighterConfig, (&'static str, String)> {
+        if self.game_id != "starfighter" {
+            return Err((
+                "ERR_UNSUPPORTED_GAME",
+                format!(
+                    "game {} is not simulated by this engine",
+                    self.game_id
+                ),
+            ));
+        }
+        if self.game_version.is_empty() {
+            return Err((
+                "ERR_INVALID_PAYLOAD",
+                "gameVersion is required".into(),
+            ));
+        }
+        if self.expected_engine_version != env!("CARGO_PKG_VERSION") {
+            return Err((
+                "ERR_ENGINE_VERSION_MISMATCH",
+                format!(
+                    "expected engine {}, this engine is {}",
+                    self.expected_engine_version,
+                    env!("CARGO_PKG_VERSION")
+                ),
+            ));
+        }
+        self.tick_rate
+            .validate()
+            .map_err(|e| ("ERR_INVALID_TICK_RATE", e))?;
+        if self.max_ticks <= 0 {
+            return Err((
+                "ERR_INVALID_PAYLOAD",
+                "maxTicks must be positive".into(),
+            ));
+        }
+        if self.players.is_empty() {
+            return Err((
+                "ERR_INVALID_PLAYERS",
+                "players list cannot be empty".into(),
+            ));
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        for player in &self.players {
+            if player.is_empty() || !unique.insert(player) {
+                return Err((
+                    "ERR_INVALID_PLAYERS",
+                    "players must be unique and non-empty".into(),
+                ));
+            }
+            let digest = self
+                .participant_artifact_digests
+                .get(player)
+                .map(String::as_str)
+                .unwrap_or("");
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            {
+                return Err((
+                    "ERR_INVALID_DIGESTS",
+                    format!("player {player} has no sha256 artifact digest"),
+                ));
+            }
+        }
+        if self.participant_artifact_digests.len() != self.players.len() {
+            return Err((
+                "ERR_INVALID_DIGESTS",
+                "artifact digests must cover exactly the players".into(),
+            ));
+        }
+        crate::StarfighterConfig::from_value(&self.config)
+            .map_err(|e| ("ERR_INVALID_CONFIG", e))
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -472,38 +555,23 @@ pub fn run_stdio_server() {
                     );
                     continue;
                 }
-                if req.players.is_empty() {
-                    send_error_with_code(
-                        &mut stdout,
-                        &mut out_seq,
-                        &env.match_id,
-                        "ERR_INVALID_PLAYERS",
-                        "players list cannot be empty",
-                        true,
-                    );
-                    continue;
-                }
-
-                let starfighter_config =
-                    crate::StarfighterConfig::from_value_or_default(
-                        &req.config,
-                    );
-                let tick_hz = if let Some(hz) = req.tick_hz {
-                    if hz > 0.0 {
-                        hz
-                    } else {
-                        starfighter_config.tick_hz
+                let starfighter_config = match req.validate() {
+                    Ok(cfg) => cfg,
+                    Err((code, message)) => {
+                        send_error_with_code(
+                            &mut stdout,
+                            &mut out_seq,
+                            &env.match_id,
+                            code,
+                            &message,
+                            true,
+                        );
+                        continue;
                     }
-                } else if starfighter_config.tick_hz > 0.0 {
-                    starfighter_config.tick_hz
-                } else if req.fixed_timestep_ms > 0 {
-                    1000.0 / req.fixed_timestep_ms as f64
-                } else {
-                    60.0
                 };
                 let settings = Settings {
                     seed: req.seed as u64,
-                    tick_hz,
+                    tick_hz: req.tick_rate.hz(),
                     players: req.players.len() as u32,
                     asteroid_count: starfighter_config.asteroid_count,
                     continuous_collision_detection: true,
@@ -515,7 +583,7 @@ pub fn run_stdio_server() {
                 app.cleanup();
                 app.insert_resource(
                     bevy::time::TimeUpdateStrategy::ManualDuration(
-                        Duration::from_secs_f64(1.0 / tick_hz),
+                        req.tick_rate.step(),
                     ),
                 );
                 app.update(); // Startup: spawnea las naves.

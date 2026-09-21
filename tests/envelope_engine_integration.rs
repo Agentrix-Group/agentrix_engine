@@ -8,6 +8,53 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
+/// Payload canónico de `initialize_match` tal como lo arma el executor de
+/// Agentrix: todos los campos son obligatorios.
+fn init_payload(
+    match_id: &str,
+    seed: i64,
+    max_ticks: i64,
+    players: &[&str],
+) -> Value {
+    init_payload_with_config(
+        match_id,
+        seed,
+        max_ticks,
+        players,
+        default_config(),
+    )
+}
+
+fn default_config() -> Value {
+    serde_json::to_value(bevy_starfighter::StarfighterConfig::default())
+        .unwrap()
+}
+
+fn init_payload_with_config(
+    match_id: &str,
+    seed: i64,
+    max_ticks: i64,
+    players: &[&str],
+    config: Value,
+) -> Value {
+    let digests: serde_json::Map<String, Value> = players
+        .iter()
+        .map(|p| (p.to_string(), Value::String("a".repeat(64))))
+        .collect();
+    json!({
+        "matchId": match_id,
+        "gameId": "starfighter",
+        "gameVersion": "0.1.0",
+        "expectedEngineVersion": env!("CARGO_PKG_VERSION"),
+        "seed": seed,
+        "tickRate": {"numerator": 60, "denominator": 1},
+        "maxTicks": max_ticks,
+        "players": players,
+        "config": config,
+        "participantArtifactDigests": digests,
+    })
+}
+
 struct EngineHandle {
     child: Child,
     stdin: ChildStdin,
@@ -116,15 +163,7 @@ fn full_protocol_sequence_against_real_subprocess() {
     engine.write_envelope(
         "test-match-1",
         "initialize_match",
-        json!({
-            "matchId": "test-match-1",
-            "gameId": "starfighter",
-            "seed": 7,
-            "fixedTimestepMs": 16,
-            "maxTicks": 50,
-            "players": ["p0", "p1"],
-            "config": {"radar_range": "800"}
-        }),
+        init_payload("test-match-1", 7, 50, &["p0", "p1"]),
     );
     let initialized = engine.read_envelope();
     assert_eq!(initialized["type"], "match_initialized");
@@ -262,17 +301,7 @@ fn test_simultaneous_double_disqualification_results_in_no_winner() {
     engine.write_envelope(
         "test-match-double-dq",
         "initialize_match",
-        json!({
-            "matchId": "test-match-double-dq",
-            "gameId": "starfighter",
-            "players": ["p0", "p1"],
-            "seed": 42,
-            "maxTicks": 10,
-            "config": {
-                "radar_range": "800.0"
-            },
-            "fixedTimestepMs": 17,
-        }),
+        init_payload("test-match-double-dq", 42, 10, &["p0", "p1"]),
     );
     let init_ack = engine.read_envelope();
     assert_eq!(init_ack["type"], "match_initialized");
@@ -344,13 +373,7 @@ fn test_invalid_sequence_rejected_with_error() {
         "m-bad-seq",
         "initialize_match",
         5,
-        json!({
-            "matchId": "m-bad-seq",
-            "gameId": "starfighter",
-            "seed": 123,
-            "maxTicks": 100,
-            "players": ["p1", "p2"],
-        }),
+        init_payload("m-bad-seq", 123, 100, &["p1", "p2"]),
     );
 
     let err_env = engine.read_envelope();
@@ -370,13 +393,7 @@ fn test_incompatible_protocol_version_rejected_with_error() {
         "m-bad-ver",
         "initialize_match",
         1,
-        json!({
-            "matchId": "m-bad-ver",
-            "gameId": "starfighter",
-            "seed": 123,
-            "maxTicks": 100,
-            "players": ["p1", "p2"],
-        }),
+        init_payload("m-bad-ver", 123, 100, &["p1", "p2"]),
     );
 
     let err_env = engine.read_envelope();
@@ -416,14 +433,7 @@ fn test_match_id_mismatch_rejected_with_error() {
     engine.write_envelope(
         "m-match-1",
         "initialize_match",
-        json!({
-            "matchId": "m-match-1",
-            "gameId": "starfighter",
-            "seed": 42,
-            "tickHz": 60.0,
-            "maxTicks": 100,
-            "players": ["p1", "p2"],
-        }),
+        init_payload("m-match-1", 42, 100, &["p1", "p2"]),
     );
 
     let init_res = engine.read_envelope();
@@ -457,13 +467,7 @@ fn test_initialize_twice_rejected_with_invalid_state() {
     engine.write_envelope(
         "m-match-dup",
         "initialize_match",
-        json!({
-            "matchId": "m-match-dup",
-            "gameId": "starfighter",
-            "seed": 42,
-            "maxTicks": 100,
-            "players": ["p1", "p2"],
-        }),
+        init_payload("m-match-dup", 42, 100, &["p1", "p2"]),
     );
 
     let init_res = engine.read_envelope();
@@ -473,13 +477,7 @@ fn test_initialize_twice_rejected_with_invalid_state() {
     engine.write_envelope(
         "m-match-dup",
         "initialize_match",
-        json!({
-            "matchId": "m-match-dup",
-            "gameId": "starfighter",
-            "seed": 99,
-            "maxTicks": 100,
-            "players": ["p1", "p2"],
-        }),
+        init_payload("m-match-dup", 99, 100, &["p1", "p2"]),
     );
 
     let err_env = engine.read_envelope();
@@ -497,21 +495,14 @@ fn test_custom_starfighter_config_and_exact_60hz() {
     engine.write_envelope(
         "m-config-60hz",
         "initialize_match",
-        json!({
-            "matchId": "m-config-60hz",
-            "gameId": "starfighter",
-            "seed": 777,
-            "tickHz": 60.0,
-            "maxTicks": 50,
-            "players": ["p1", "p2"],
-            "config": {
-                "tick_hz": 60.0,
-                "arena_width": 2400.0,
-                "arena_height": 1200.0,
-                "ship_max_health": 150.0,
-                "ship_max_energy": 120.0,
-                "radar_range": 900.0
-            }
+        init_payload_with_config("m-config-60hz", 777, 50, &["p1", "p2"], {
+            let mut config = default_config();
+            config["arena_width"] = json!(2400.0);
+            config["arena_height"] = json!(1200.0);
+            config["ship_max_health"] = json!(150.0);
+            config["ship_max_energy"] = json!(120.0);
+            config["radar_range"] = json!(900.0);
+            config
         }),
     );
 
@@ -543,4 +534,66 @@ fn test_custom_starfighter_config_and_exact_60hz() {
     assert_eq!(ack["type"], "shutdown_ack");
     let status = engine.child.wait().unwrap();
     assert!(status.success());
+}
+
+#[test]
+fn test_unknown_or_missing_config_keys_are_rejected() {
+    for (label, config) in [
+        ("unknown key", {
+            let mut c = default_config();
+            c["tick_hz"] = json!(60.0);
+            c
+        }),
+        ("missing key", {
+            let mut c = default_config();
+            c.as_object_mut().unwrap().remove("radar_range");
+            c
+        }),
+    ] {
+        let mut engine = EngineHandle::spawn();
+        assert_eq!(engine.read_envelope()["type"], "engine_ready");
+        engine.write_envelope(
+            "m-strict",
+            "initialize_match",
+            init_payload_with_config("m-strict", 1, 10, &["p1", "p2"], config),
+        );
+        let err = engine.read_envelope();
+        assert_eq!(err["type"], "engine_error", "{label} must be rejected");
+        assert_eq!(err["payload"]["code"], "ERR_INVALID_CONFIG", "{label}");
+    }
+}
+
+#[test]
+fn test_legacy_timestep_fields_are_rejected() {
+    let mut engine = EngineHandle::spawn();
+    assert_eq!(engine.read_envelope()["type"], "engine_ready");
+    let mut payload = init_payload("m-legacy", 1, 10, &["p1", "p2"]);
+    payload["fixedTimestepMs"] = json!(17);
+    engine.write_envelope("m-legacy", "initialize_match", payload);
+    let err = engine.read_envelope();
+    assert_eq!(err["type"], "engine_error");
+    assert_eq!(err["payload"]["code"], "ERR_INVALID_PAYLOAD");
+}
+
+#[test]
+fn test_engine_version_and_digests_are_enforced() {
+    let mut engine = EngineHandle::spawn();
+    assert_eq!(engine.read_envelope()["type"], "engine_ready");
+    let mut payload = init_payload("m-ver", 1, 10, &["p1", "p2"]);
+    payload["expectedEngineVersion"] = json!("0.0.0");
+    engine.write_envelope("m-ver", "initialize_match", payload);
+    assert_eq!(
+        engine.read_envelope()["payload"]["code"],
+        "ERR_ENGINE_VERSION_MISMATCH"
+    );
+
+    let mut engine = EngineHandle::spawn();
+    assert_eq!(engine.read_envelope()["type"], "engine_ready");
+    let mut payload = init_payload("m-dig", 1, 10, &["p1", "p2"]);
+    payload["participantArtifactDigests"]["p2"] = json!("not-a-digest");
+    engine.write_envelope("m-dig", "initialize_match", payload);
+    assert_eq!(
+        engine.read_envelope()["payload"]["code"],
+        "ERR_INVALID_DIGESTS"
+    );
 }
