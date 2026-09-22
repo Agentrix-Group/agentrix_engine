@@ -28,13 +28,13 @@ bevy = { version = "0.19", default-features = false }
 avian2d = { version = "0.7.0", default-features = false, features = ["2d", "f32", "parry-f32", "default-collider"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 agentrix-sim-core = { path = "crates/sim-core" }
 agentrix-engine-host = { path = "crates/engine-host" }
 
 [dev-dependencies]
-proptest = "1"
-criterion = "0.5"
+proptest = "1.11"
+criterion = "0.8"
 agentrix-conformance-game = { path = "crates/games/conformance-game" }
 
 [[bench]]

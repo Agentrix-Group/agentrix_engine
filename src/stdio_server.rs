@@ -65,7 +65,13 @@ pub fn compute_self_digest() -> Option<String> {
         if let Ok(bytes) = std::fs::read(exe_path) {
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
-            return Some(format!("{:x}", hasher.finalize()));
+            return Some(
+                hasher
+                    .finalize()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            );
         }
     }
     None
