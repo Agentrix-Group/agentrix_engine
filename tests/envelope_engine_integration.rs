@@ -265,9 +265,16 @@ fn test_simultaneous_double_disqualification_results_in_no_winner() {
             }
         }),
     );
+    // ADR-0004 con la regla de ADR-0013: ambas naves caen en el mismo tick,
+    // la partida termina ahí, sin ganador y con los dos slots empatados.
     let result = engine.read_envelope();
-    assert_eq!(result["type"], "tick_completed");
+    assert_eq!(result["type"], "match_completed");
     assert_eq!(result["payload"]["tick"], 1);
+    assert_eq!(result["payload"]["terminal"], true);
+    let outcome = &result["payload"]["result"];
+    assert!(outcome["winner"].is_null(), "result: {outcome}");
+    assert_eq!(outcome["rankings"][0]["rank"], 1);
+    assert_eq!(outcome["rankings"][1]["rank"], 1);
 
     // Call finish_match
     engine.write_envelope(

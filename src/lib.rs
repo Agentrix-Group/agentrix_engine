@@ -442,6 +442,16 @@ pub struct FighterDestroyed {
     pub player_id: usize,
 }
 
+/// Pedido de eliminar una nave cuyo agente fue descalificado (timeout,
+/// crash) en este tick (ADR-0013): la nave sale de la partida sin atribuir
+/// la baja a nadie y los demás siguen jugando. En 1 contra 1 reproduce la
+/// política de ADR-0004: con una sola descalificación gana el rival y con
+/// dos simultáneas ambas naves caen en el mismo tick y empatan.
+#[derive(Message, Clone, Copy)]
+pub struct DisqualifyFighter {
+    pub entity: Entity,
+}
+
 /// Condición de fin de partida: simétrica, no distingue slots. Se fija
 /// una sola vez, la primera vez que queda una nave viva o cero (empate
 /// por destrucción mutua). El límite de ticks lo aplica quien corre la
@@ -678,6 +688,7 @@ pub fn build_app(settings: Settings) -> App {
         .init_resource::<Scoreboard>()
         .add_message::<FighterActionMessage>()
         .add_message::<FighterDestroyed>()
+        .add_message::<DisqualifyFighter>()
         .insert_resource(settings)
         .add_observer(release_allocated_id)
         .add_systems(Startup, setup)
@@ -685,6 +696,7 @@ pub fn build_app(settings: Settings) -> App {
             Update,
             (
                 advance_simulation_clock,
+                apply_disqualifications,
                 check_boundary_collision,
                 spawn_asteroids,
                 fighter_actions,
@@ -1311,6 +1323,43 @@ fn take_hit(
         return true;
     }
     false
+}
+
+/// Elimina las naves descalificadas en este tick, antes de cualquier otra
+/// regla: su acción del tick ya no se aplica y no pueden recibir ni causar
+/// daño.
+fn apply_disqualifications(
+    mut cmd: Commands,
+    mut requests: MessageReader<DisqualifyFighter>,
+    fighters: Query<&Fighter>,
+    mut destroyed: MessageWriter<FighterDestroyed>,
+    mut events: ResMut<TickEvents>,
+    mut scoreboard: ResMut<Scoreboard>,
+    clock: Res<SimulationClock>,
+) {
+    let mut removed: Vec<Entity> = Vec::new();
+    for DisqualifyFighter { entity } in requests.read() {
+        if removed.contains(entity) {
+            continue;
+        }
+        let Ok(fighter) = fighters.get(*entity) else {
+            continue;
+        };
+        removed.push(*entity);
+        events.0.push(StarfighterEvent::Destroyed {
+            player_id: fighter.player_id,
+            source: "disqualified".to_string(),
+            killer: None,
+        });
+        scoreboard
+            .eliminated_at
+            .insert(fighter.player_id, clock.tick());
+        destroyed.write(FighterDestroyed {
+            entity: *entity,
+            player_id: fighter.player_id,
+        });
+        cmd.entity(*entity).despawn();
+    }
 }
 
 /// Fija `MatchResult` la primera vez que queda una nave viva (gana ese

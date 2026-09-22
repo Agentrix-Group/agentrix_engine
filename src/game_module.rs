@@ -7,7 +7,7 @@
 use crate::physics::{from_rapier, quat_to_cos_sin, unpack_stable_id};
 use crate::protocol::WireAction;
 use crate::{
-    AngularVelocity, LinearVelocity, Physics, ThrustForce,
+    AngularVelocity, DisqualifyFighter, LinearVelocity, Physics, ThrustForce,
     build_app, build_perception, collect_bullet_snapshots,
     collect_fighter_snapshots, Asteroid, Bullet, CollisionType, EntityId,
     EntityIdAllocator, Fighter, FighterAction, FighterActionMessage,
@@ -302,6 +302,16 @@ impl Simulation for StarfighterSimulation {
                             )
                         })?;
                     FighterAction::from(wire)
+                }
+                Some(outcome)
+                    if outcome.status == ActionStatus::Disqualified =>
+                {
+                    if let Some(entity) = self.entities.get(player_id) {
+                        self.app
+                            .world_mut()
+                            .write_message(DisqualifyFighter { entity: *entity });
+                    }
+                    neutral_action()
                 }
                 _ => neutral_action(),
             };
@@ -996,6 +1006,94 @@ mod tests {
             .as_array()
             .map(|fighters| 5 - fighters.len())
             .unwrap_or(0)
+    }
+
+    fn dq_action() -> SlotAction {
+        SlotAction {
+            status: ActionStatus::Disqualified,
+            requested: None,
+            applied: None,
+            policy_decision: "disqualify".to_string(),
+            error_code: Some("timeout".to_string()),
+        }
+    }
+
+    fn start_host(players: usize) -> EngineHost {
+        let mut registry = GameRegistry::new();
+        registry.register(Arc::new(StarfighterGame::new())).unwrap();
+        let mut host = EngineHost::new(registry);
+        host.initialize(ffa_spec(players, 100)).unwrap();
+        host
+    }
+
+    /// ADR-0013: en 5 jugadores, un slot descalificado pierde su nave en
+    /// ese tick, sin baja para nadie, deja de recibir observación y la
+    /// partida sigue; al final queda último.
+    #[test]
+    fn disqualified_slot_leaves_and_free_for_all_continues() {
+        let mut host = start_host(5);
+        let mut actions = ActionBatch::new();
+        actions.insert("slot-2".to_string(), dq_action());
+        let frame = host.advance(0, &actions).unwrap();
+        assert!(!frame.terminal, "four ships remain, the match goes on");
+        assert!(!frame.observations.contains_key("slot-2"));
+        assert_eq!(frame.observations.len(), 4);
+        assert!(frame.events.contains(&serde_json::json!({
+            "type": "destroyed",
+            "player_id": 2,
+            "source": "disqualified",
+            "killer": null
+        })));
+
+        let mut last = frame;
+        for tick in 1..100 {
+            last = host.advance(tick, &ActionBatch::new()).unwrap();
+            if last.terminal {
+                break;
+            }
+        }
+        let rankings = last.result.unwrap()["rankings"].clone();
+        let slot2 = rankings
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["slot"] == "slot-2")
+            .unwrap()
+            .clone();
+        assert_eq!(slot2["rank"], 5, "rankings: {rankings}");
+        assert_eq!(slot2["score"], 0);
+    }
+
+    /// ADR-0004 con la regla de ADR-0013: en 1 contra 1, una sola
+    /// descalificación le da la victoria al rival.
+    #[test]
+    fn single_disqualification_in_duel_gives_the_win_to_the_rival() {
+        let mut host = start_host(2);
+        let mut actions = ActionBatch::new();
+        actions.insert("slot-0".to_string(), dq_action());
+        let frame = host.advance(0, &actions).unwrap();
+        assert!(frame.terminal);
+        let result = frame.result.unwrap();
+        assert_eq!(result["winner"], "slot-1");
+        assert_eq!(result["rankings"][0]["slot"], "slot-1");
+        assert_eq!(result["rankings"][0]["rank"], 1);
+        assert_eq!(result["rankings"][1]["rank"], 2);
+    }
+
+    /// ADR-0004: dos descalificaciones simultáneas son simétricas: sin
+    /// ganador y ambos slots empatados en el primer puesto.
+    #[test]
+    fn double_disqualification_in_duel_has_no_winner() {
+        let mut host = start_host(2);
+        let mut actions = ActionBatch::new();
+        actions.insert("slot-0".to_string(), dq_action());
+        actions.insert("slot-1".to_string(), dq_action());
+        let frame = host.advance(0, &actions).unwrap();
+        assert!(frame.terminal);
+        let result = frame.result.unwrap();
+        assert!(result["winner"].is_null(), "result: {result}");
+        assert_eq!(result["rankings"][0]["rank"], 1);
+        assert_eq!(result["rankings"][1]["rank"], 1);
     }
 
     #[test]
