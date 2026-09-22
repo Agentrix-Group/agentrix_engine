@@ -121,7 +121,6 @@ impl GameModule for StarfighterGame {
             tick_rate: spec.tick_rate,
             players: spec.slots.len() as u32,
             asteroid_count: config.asteroid_count,
-            radar_range: config.radar_range,
             max_entities: u64::from(spec.limits.max_entities),
             config,
             ..Settings::default()
@@ -247,7 +246,7 @@ impl StarfighterSimulation {
                 build_perception(
                     self.tick,
                     player_id,
-                    self.app.world().resource::<Settings>().radar_range,
+                    self.app.world().resource::<Settings>().radar_range(),
                     &fighters,
                     &bullets,
                 )
@@ -1077,7 +1076,6 @@ mod tests {
             tick_rate: simulation_spec.tick_rate,
             players: 2,
             asteroid_count: config.asteroid_count,
-            radar_range: config.radar_range,
             max_entities: u64::from(simulation_spec.limits.max_entities),
             config,
             ..Settings::default()

@@ -141,7 +141,6 @@ pub struct Settings {
     pub players: u32,
     pub asteroid_count: u32,
     pub continuous_collision_detection: bool,
-    pub radar_range: f32,
     pub config: StarfighterConfig,
     pub max_entities: u64,
 }
@@ -155,7 +154,6 @@ impl Default for Settings {
             players: 2,
             asteroid_count: config.asteroid_count,
             continuous_collision_detection: true,
-            radar_range: config.radar_range,
             config,
             max_entities: 10_000,
         }
@@ -171,6 +169,11 @@ impl Settings {
     #[inline]
     pub fn arena_half_height(&self) -> f32 {
         self.config.arena_height * 0.5
+    }
+
+    #[inline]
+    pub fn radar_range(&self) -> f32 {
+        self.config.radar_range
     }
 
     #[inline]
@@ -359,6 +362,24 @@ impl EntityIdAllocator {
     pub fn next_id(&self) -> u64 {
         self.next
     }
+
+    pub fn active_count(&self) -> u64 {
+        self.active_count
+    }
+}
+
+/// Marca las entidades cuyo `EntityId` salió de `EntityIdAllocator`. Al
+/// despawnearse, `release_allocated_id` devuelve su lugar al cupo de
+/// `max_entities`; sin esto el cupo solo crece y, al agotarse, las naves
+/// dejan de poder disparar en plena partida.
+#[derive(Component)]
+pub struct AllocatedId;
+
+fn release_allocated_id(
+    _: On<Remove, AllocatedId>,
+    mut ids: ResMut<EntityIdAllocator>,
+) {
+    ids.deallocate();
 }
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -546,6 +567,7 @@ pub fn build_app(settings: Settings) -> App {
         .add_message::<FighterActionMessage>()
         .add_message::<FighterDestroyed>()
         .insert_resource(settings)
+        .add_observer(release_allocated_id)
         .add_systems(Startup, setup)
         .add_systems(
             FixedUpdate,
@@ -629,7 +651,7 @@ pub fn spawn_bullet(
     lifetime: u32,
     player_id: usize,
     stable_id: StableEntityId,
-) {
+) -> Entity {
     let mut entity = cmd.spawn((
         Bullet {
             remaining_lifetime: lifetime as i32,
@@ -648,6 +670,7 @@ pub fn spawn_bullet(
     if settings.continuous_collision_detection {
         entity.insert(SweptCcd::default());
     }
+    entity.id()
 }
 
 fn spawn_asteroids(
@@ -682,6 +705,7 @@ fn spawn_asteroids(
                     radius,
                 },
                 EntityId(id),
+                AllocatedId,
                 RigidBody::Dynamic,
                 LockedAxes::ROTATION_LOCKED,
                 Collider::circle(radius),
@@ -803,7 +827,7 @@ pub fn fighter_actions(
                 && fighter.energy >= shoot_cost
             {
                 if let Ok(bullet_id) = ids.allocate() {
-                    spawn_bullet(
+                    let bullet = spawn_bullet(
                         &mut cmd,
                         &settings,
                         transform.translation.truncate() + facing * 24.0,
@@ -812,6 +836,7 @@ pub fn fighter_actions(
                         fighter.player_id,
                         bullet_id,
                     );
+                    cmd.entity(bullet).insert(AllocatedId);
                     fighter.remaining_bullet_cooldown =
                         fighter.bullet_cooldown as i32;
                     fighter.energy -= shoot_cost;
@@ -870,11 +895,36 @@ fn expire_bullets(
     }
 }
 
+/// Clave canónica de un par en colisión: los `EntityId` estables del par,
+/// menor primero. Las entidades sin `EntityId` van al final.
+fn collision_pair_key(
+    ids: &Query<&EntityId>,
+    a: Entity,
+    b: Entity,
+) -> (u64, u64) {
+    let id = |entity| ids.get(entity).map(|id| id.0 .0).unwrap_or(u64::MAX);
+    let (ia, ib) = (id(a), id(b));
+    (ia.min(ib), ia.max(ib))
+}
+
+/// Aplica las reglas de contacto del tick.
+///
+/// Los pares se procesan en orden canónico por `EntityId`, no en el orden
+/// en que el backend físico los reporta, y cada entidad consumida en el
+/// tick (bala que impactó, asteroide destruido, nave destruida) deja de
+/// producir efectos: el despawn por `Commands` es diferido, así que sin este
+/// registro una nave podía recibir daño y emitir `Destroyed` dos veces, o
+/// una bala golpear dos objetivos.
+///
+/// Excepción deliberada: un asteroide que toca varias naves en el mismo tick
+/// daña a todas. Si solo dañara a la primera, el orden por id favorecería a
+/// los slots de id mayor.
 #[allow(clippy::too_many_arguments)]
 fn detect_collisions(
     mut cmd: Commands,
     mut collisions: MessageReader<CollisionStart>,
     collision_type: Query<&CollisionType>,
+    ids: Query<&EntityId>,
     mut fighters: Query<&mut Fighter>,
     bullets: Query<&Bullet>,
     mut asteroids: Query<&mut Asteroid>,
@@ -882,8 +932,15 @@ fn detect_collisions(
     mut events: ResMut<TickEvents>,
     settings: Res<Settings>,
 ) {
-    for event in collisions.read() {
-        let (a, b) = (event.collider1, event.collider2);
+    let mut pairs: Vec<(Entity, Entity)> = collisions
+        .read()
+        .map(|event| (event.collider1, event.collider2))
+        .collect();
+    pairs.sort_by_key(|&(a, b)| collision_pair_key(&ids, a, b));
+    pairs.dedup_by_key(|&mut (a, b)| collision_pair_key(&ids, a, b));
+
+    let mut consumed: Vec<Entity> = Vec::new();
+    for (a, b) in pairs {
         let (Ok(ta), Ok(tb)) = (collision_type.get(a), collision_type.get(b))
         else {
             continue;
@@ -897,7 +954,10 @@ fn detect_collisions(
                     } else {
                         (b, a)
                     };
-                take_hit(
+                if consumed.contains(&fighter_entity) {
+                    continue;
+                }
+                if take_hit(
                     &mut cmd,
                     &mut fighters,
                     fighter_entity,
@@ -906,8 +966,13 @@ fn detect_collisions(
                     "an asteroid",
                     &mut destroyed,
                     &mut events,
-                );
-                cmd.entity(asteroid_entity).despawn();
+                ) {
+                    consumed.push(fighter_entity);
+                }
+                if !consumed.contains(&asteroid_entity) {
+                    consumed.push(asteroid_entity);
+                    cmd.entity(asteroid_entity).despawn();
+                }
             }
             (CollisionType::Bullet, CollisionType::Asteroid)
             | (CollisionType::Asteroid, CollisionType::Bullet) => {
@@ -917,10 +982,17 @@ fn detect_collisions(
                     } else {
                         (b, a)
                     };
+                if consumed.contains(&bullet_entity)
+                    || consumed.contains(&asteroid_entity)
+                {
+                    continue;
+                }
+                consumed.push(bullet_entity);
                 cmd.entity(bullet_entity).despawn();
                 if let Ok(mut asteroid) = asteroids.get_mut(asteroid_entity) {
                     asteroid.health -= 1.0;
                     if asteroid.health <= 0.0 {
+                        consumed.push(asteroid_entity);
                         cmd.entity(asteroid_entity).despawn();
                     }
                 }
@@ -933,6 +1005,11 @@ fn detect_collisions(
                     } else {
                         (b, a)
                     };
+                if consumed.contains(&fighter_entity)
+                    || consumed.contains(&bullet_entity)
+                {
+                    continue;
+                }
                 let shooter =
                     bullets.get(bullet_entity).ok().map(|b| b.player_id);
                 let same_owner = fighters
@@ -947,7 +1024,7 @@ fn detect_collisions(
                     let source = shooter
                         .map(|id| format!("P{id}'s bullet"))
                         .unwrap_or_else(|| "a bullet".to_string());
-                    take_hit(
+                    if take_hit(
                         &mut cmd,
                         &mut fighters,
                         fighter_entity,
@@ -956,11 +1033,18 @@ fn detect_collisions(
                         &source,
                         &mut destroyed,
                         &mut events,
-                    );
+                    ) {
+                        consumed.push(fighter_entity);
+                    }
+                    consumed.push(bullet_entity);
                     cmd.entity(bullet_entity).despawn();
                 }
             }
             (CollisionType::Bullet, CollisionType::Bullet) => {
+                if consumed.contains(&a) || consumed.contains(&b) {
+                    continue;
+                }
+                consumed.extend([a, b]);
                 cmd.entity(a).despawn();
                 cmd.entity(b).despawn();
             }
@@ -972,6 +1056,7 @@ fn detect_collisions(
 /// Resta `damage` a la nave (reducido si tiene el escudo activo) y la
 /// destruye si su HP llega a cero. Mismo camino para cualquier
 /// `player_id` — no hay ninguna rama especial por slot acá.
+/// Devuelve `true` si la nave quedó destruida.
 #[allow(clippy::too_many_arguments)]
 fn take_hit(
     cmd: &mut Commands,
@@ -982,9 +1067,9 @@ fn take_hit(
     source: &str,
     destroyed: &mut MessageWriter<FighterDestroyed>,
     events: &mut TickEvents,
-) {
+) -> bool {
     let Ok(mut fighter) = fighters.get_mut(entity) else {
-        return;
+        return false;
     };
     let effective_damage = if fighter.shield_active {
         damage * (1.0 - shield_reduction)
@@ -1009,7 +1094,9 @@ fn take_hit(
             player_id: fighter.player_id,
         });
         cmd.entity(entity).despawn();
+        return true;
     }
+    false
 }
 
 /// Fija `MatchResult` la primera vez que queda una nave viva (gana ese
@@ -1677,6 +1764,157 @@ mod tests {
         assert!(
             (dist - 100.0).abs() < 5.0,
             "la distancia relativa leída del ECS debería ser ~100, fue {dist}"
+        );
+    }
+
+    /// F1: una partida larga disparando sin parar no agota `max_entities`.
+    /// Antes de liberar ids al despawnear, el cupo solo crecía y, al
+    /// llenarse, `fighter_actions` dejaba de crear balas sin ningún error.
+    /// El cupo (64) es muy inferior a las balas y asteroides creados en
+    /// 10 000 ticks, así que el test solo pasa si los ids se liberan.
+    #[test]
+    fn long_match_shooting_never_exhausts_entity_budget() {
+        const TICKS: u32 = 10_000;
+        let settings = Settings {
+            players: 0,
+            max_entities: 64,
+            config: StarfighterConfig {
+                // Los asteroides chocan y se reciclan sin matar a la nave.
+                asteroid_damage: 0.0,
+                ..StarfighterConfig::default()
+            },
+            ..default()
+        };
+        let mut app = build_app(settings);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_secs_f64(1.0 / 60.0),
+        ));
+        app.finish();
+        app.cleanup();
+        app.update();
+        let entity =
+            spawn_fighter(&mut app.world_mut().commands(), 0, Vec2::ZERO);
+        app.world_mut().flush();
+
+        let fired = |app: &App| {
+            app.world()
+                .resource::<TickEvents>()
+                .0
+                .iter()
+                .filter(|event| matches!(event, StarfighterEvent::Fired { .. }))
+                .count()
+        };
+        let action = FighterAction {
+            thrust: Thrust::Off,
+            turn: Turn::Left,
+            shoot: Shoot::On,
+            shield: Shield::Off,
+        };
+        let mut fired_before_last_1000 = 0;
+        for tick in 0..TICKS {
+            if tick == TICKS - 1000 {
+                fired_before_last_1000 = fired(&app);
+            }
+            app.world_mut()
+                .write_message(FighterActionMessage { action, entity });
+            app.update();
+        }
+        let total_fired = fired(&app);
+        assert!(
+            total_fired > 64,
+            "el test debe disparar más balas que el cupo: {total_fired}"
+        );
+        assert!(
+            total_fired > fired_before_last_1000,
+            "la nave dejó de disparar en los últimos 1000 ticks ({total_fired} disparos en total)"
+        );
+
+        let live_allocated = app
+            .world_mut()
+            .query_filtered::<(), With<AllocatedId>>()
+            .iter(app.world())
+            .count() as u64;
+        assert_eq!(
+            app.world().resource::<EntityIdAllocator>().active_count(),
+            live_allocated,
+            "el cupo ocupado debe ser igual a las entidades vivas con id asignado"
+        );
+    }
+
+    /// F1: una nave destruida por un asteroide no puede recibir además una
+    /// bala en el mismo tick. El despawn por `Commands` es diferido, así que
+    /// antes `take_hit` la encontraba de nuevo y emitía dos `Destroyed`.
+    #[test]
+    fn fighter_destroyed_once_when_hit_twice_in_same_tick() {
+        let settings = Settings {
+            players: 0,
+            asteroid_count: 0,
+            ..default()
+        };
+        let mut app = build_app(settings);
+        app.finish();
+        app.cleanup();
+        app.update();
+
+        let fighter =
+            spawn_fighter(&mut app.world_mut().commands(), 0, Vec2::ZERO);
+        let asteroid = app
+            .world_mut()
+            .spawn((
+                Asteroid {
+                    health: 2.0,
+                    radius: 10.0,
+                },
+                EntityId(StableEntityId(1_000_000)),
+                CollisionType::Asteroid,
+            ))
+            .id();
+        let bullet = app
+            .world_mut()
+            .spawn((
+                Bullet {
+                    remaining_lifetime: 10,
+                    player_id: 1,
+                },
+                EntityId(StableEntityId(1_000_001)),
+                CollisionType::Bullet,
+            ))
+            .id();
+        app.world_mut().flush();
+        // Ambos impactos son letales por sí solos.
+        app.world_mut().get_mut::<Fighter>(fighter).unwrap().health = 10.0;
+
+        // El orden de reporte no importa: se procesan por EntityId.
+        for other in [bullet, asteroid] {
+            app.world_mut().write_message(CollisionStart {
+                collider1: other,
+                collider2: fighter,
+                body1: Some(other),
+                body2: Some(fighter),
+            });
+        }
+        app.world_mut()
+            .run_system_once(detect_collisions)
+            .expect("run_system_once no debería fallar");
+        app.world_mut().flush();
+
+        let events = &app.world().resource::<TickEvents>().0;
+        let destroyed = events
+            .iter()
+            .filter(|event| matches!(event, StarfighterEvent::Destroyed { .. }))
+            .count();
+        assert_eq!(destroyed, 1, "eventos: {events:?}");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StarfighterEvent::Destroyed { source, .. } if source == "an asteroid"
+            )),
+            "el asteroide (id menor) debe resolverse primero: {events:?}"
+        );
+        assert!(app.world().get_entity(fighter).is_err());
+        assert!(
+            app.world().get_entity(bullet).is_ok(),
+            "la bala no impactó a nadie y debe seguir viva"
         );
     }
 

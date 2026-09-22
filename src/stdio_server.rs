@@ -141,7 +141,7 @@ impl<R: BufRead, W: Write> StdioServer<R, W> {
             "supportedProtocols": [PROTOCOL_VERSION],
             "engineDigest": engine_digest,
             "buildIdentity": "starfighter-build",
-            "target": "x86_64-unknown-linux-gnu",
+            "target": env!("AGENTRIX_BUILD_TARGET"),
             "games": descriptors,
             "capabilities": {
                 "authoritative_commitment": true,
