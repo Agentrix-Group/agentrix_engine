@@ -1,0 +1,51 @@
+{
+  "protocolVersion": "agentrix-engine/2",
+  "runId": "run-test-1",
+  "matchId": "match-test-1",
+  "engineVersion": "0.3.0",
+  "engineDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "buildIdentity": "test-build",
+  "target": "x86_64-unknown-linux-gnu",
+  "game": {
+    "gameId": "test",
+    "gameVersion": "1",
+    "gameDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "schemaDigests": {
+    "action": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "observation": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "public": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "replay": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "config": {
+    "difficulty": 2,
+    "nested": {
+      "enabled": true
+    }
+  },
+  "configDigest": "39f02816dba5afd8afa2e81b031a620544f7509ef0cd69362baf870eacd6e821",
+  "tickRate": {
+    "numerator": 60,
+    "denominator": 1
+  },
+  "seed": 7,
+  "slots": [
+    {
+      "slotId": "alpha",
+      "artifactDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "slotId": "beta",
+      "artifactDigest": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "limits": {
+    "maxTicks": 10,
+    "maxPlayers": 2,
+    "maxEntities": 100,
+    "maxMessageBytes": 65536
+  },
+  "failurePolicyVersion": "failure-policy/1",
+  "determinismTier": "same_artifact_same_target",
+  "rngAlgorithm": "xoshiro256starstar/1"
+}

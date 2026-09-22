@@ -2,7 +2,8 @@ use agentrix_conformance_game::{conformance_game_key, ConformanceGame};
 use agentrix_engine_host::{EngineHost, GameRegistry};
 use agentrix_sim_core::{
     canonical_json_digest, ActionBatch, ActionStatus, DeterminismTier,
-    SimulationSpec, SlotAction, StateCommitments, TickRate, RNG_ALGORITHM,
+    ExecutionLimits, ExecutionSlotSpec, SchemaDigests, SimulationSpec,
+    SlotAction, StateCommitments, TickRate, PROTOCOL_VERSION, RNG_ALGORITHM,
 };
 use bevy_starfighter::game_module::{starfighter_game_key, StarfighterGame};
 use bevy_starfighter::StarfighterConfig;
@@ -26,13 +27,41 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn run_conformance() -> Result<Vec<StateCommitments>, Box<dyn Error>> {
     let config = json!({"target": 3});
     let spec = SimulationSpec {
+        protocol_version: PROTOCOL_VERSION.to_string(),
+        run_id: "conformance-run-1".to_string(),
+        match_id: "conformance-match-1".to_string(),
+        engine_version: "0.1.0".to_string(),
+        engine_digest: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        build_identity: "conformance-build".to_string(),
+        target: "x86_64-unknown-linux-gnu".to_string(),
         game: conformance_game_key(),
+        schema_digests: SchemaDigests {
+            action: agentrix_conformance_game::ACTION_SCHEMA_DIGEST.to_string(),
+            observation: agentrix_conformance_game::OBSERVATION_SCHEMA_DIGEST.to_string(),
+            public: agentrix_conformance_game::PUBLIC_SCHEMA_DIGEST.to_string(),
+            replay: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        },
         config_digest: canonical_json_digest("conformance-config", &config)?,
         config,
         tick_rate: TickRate::new(60, 1)?,
         seed: 11,
-        slots: vec!["alpha".to_string(), "beta".to_string()],
-        max_ticks: 10,
+        slots: vec![
+            ExecutionSlotSpec {
+                slot_id: "alpha".to_string(),
+                artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            },
+            ExecutionSlotSpec {
+                slot_id: "beta".to_string(),
+                artifact_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            },
+        ],
+        limits: ExecutionLimits {
+            max_ticks: 10,
+            max_players: 2,
+            max_entities: 100,
+            max_message_bytes: 1024 * 1024,
+        },
+        failure_policy_version: "fail-closed/1".to_string(),
         determinism_tier: DeterminismTier::SameArtifactSameTarget,
         rng_algorithm: RNG_ALGORITHM.to_string(),
     };
@@ -54,13 +83,41 @@ fn run_starfighter() -> Result<Vec<StateCommitments>, Box<dyn Error>> {
         ..StarfighterConfig::default()
     })?;
     let spec = SimulationSpec {
+        protocol_version: PROTOCOL_VERSION.to_string(),
+        run_id: "starfighter-run-1".to_string(),
+        match_id: "starfighter-match-1".to_string(),
+        engine_version: "0.3.0-core.1".to_string(),
+        engine_digest: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        build_identity: "starfighter-build".to_string(),
+        target: "x86_64-unknown-linux-gnu".to_string(),
         game: starfighter_game_key(),
+        schema_digests: SchemaDigests {
+            action: bevy_starfighter::game_module::ACTION_SCHEMA_DIGEST.to_string(),
+            observation: bevy_starfighter::game_module::OBSERVATION_SCHEMA_DIGEST.to_string(),
+            public: bevy_starfighter::game_module::PUBLIC_SCHEMA_DIGEST.to_string(),
+            replay: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        },
         config_digest: canonical_json_digest("starfighter-config", &config)?,
         config,
         tick_rate: TickRate::new(60, 1)?,
         seed: 19,
-        slots: vec!["alpha".to_string(), "beta".to_string()],
-        max_ticks: 8,
+        slots: vec![
+            ExecutionSlotSpec {
+                slot_id: "alpha".to_string(),
+                artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            },
+            ExecutionSlotSpec {
+                slot_id: "beta".to_string(),
+                artifact_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            },
+        ],
+        limits: ExecutionLimits {
+            max_ticks: 8,
+            max_players: 2,
+            max_entities: 10_000,
+            max_message_bytes: 1024 * 1024,
+        },
+        failure_policy_version: "fail-closed/1".to_string(),
         determinism_tier: DeterminismTier::SameArtifactSameTarget,
         rng_algorithm: RNG_ALGORITHM.to_string(),
     };

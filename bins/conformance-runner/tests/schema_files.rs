@@ -10,6 +10,7 @@ fn every_versioned_schema_is_valid_json() {
         ("conformance/observation", include_bytes!("../../../schemas/games/conformance-counter/1.0.0/observation.schema.json")),
         ("conformance/public", include_bytes!("../../../schemas/games/conformance-counter/1.0.0/public.schema.json")),
         ("starfighter/action", include_bytes!("../../../schemas/games/starfighter/0.3.0-core.1/action.schema.json")),
+        ("starfighter/config", include_bytes!("../../../schemas/games/starfighter/0.3.0-core.1/config.schema.json")),
         ("starfighter/observation", include_bytes!("../../../schemas/games/starfighter/0.3.0-core.1/observation.schema.json")),
         ("starfighter/public", include_bytes!("../../../schemas/games/starfighter/0.3.0-core.1/public.schema.json")),
     ];
@@ -22,5 +23,6 @@ fn every_versioned_schema_is_valid_json() {
             value["$schema"],
             "https://json-schema.org/draft/2020-12/schema"
         );
+        assert!(value["$id"].is_string(), "schema {name} missing $id");
     }
 }

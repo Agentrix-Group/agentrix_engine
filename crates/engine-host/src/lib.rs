@@ -5,10 +5,12 @@
 //! actions.
 
 use agentrix_sim_core::{
-    ActionBatch, CommitmentChain, GameKey, GameModule, SimError, Simulation,
-    SimulationFrame, SimulationSpec, StateCommitments,
+    ActionBatch, CommitmentChain, ExecutionSpec, GameDescriptor, GameKey,
+    GameModule, SimError, Simulation, StateCommitments,
 };
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -56,7 +58,7 @@ impl GameRegistry {
         })
     }
 
-    pub fn descriptors(&self) -> Vec<agentrix_sim_core::GameDescriptor> {
+    pub fn descriptors(&self) -> Vec<GameDescriptor> {
         self.games
             .values()
             .map(|game| game.descriptor().clone())
@@ -75,16 +77,22 @@ fn registry_key(key: &GameKey) -> (String, String, String) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostLifecycle {
-    Ready,
+    Created,
+    Initialized,
     Running,
-    Terminal,
+    Completed,
     Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HostFrame {
-    pub frame: SimulationFrame,
+    pub tick: u64,
+    pub public_snapshot: Value,
+    pub observations: BTreeMap<String, Value>,
+    pub events: Vec<Value>,
+    pub terminal: bool,
+    pub result: Option<Value>,
     pub commitments: StateCommitments,
 }
 
@@ -104,7 +112,7 @@ impl EngineHost {
     pub fn new(registry: GameRegistry) -> Self {
         Self {
             registry,
-            lifecycle: HostLifecycle::Ready,
+            lifecycle: HostLifecycle::Created,
             session: None,
         }
     }
@@ -119,19 +127,34 @@ impl EngineHost {
 
     pub fn initialize(
         &mut self,
-        spec: SimulationSpec,
+        spec: ExecutionSpec,
     ) -> Result<HostFrame, SimError> {
-        if self.lifecycle != HostLifecycle::Ready {
+        if self.lifecycle != HostLifecycle::Created {
             return Err(SimError::new(
                 "invalid_lifecycle",
-                "initialize is only valid in ready state",
+                format!(
+                    "initialize is only valid in created state, host is {:?}",
+                    self.lifecycle
+                ),
             ));
         }
-        spec.validate_common()?;
-        let game = self.registry.resolve(&spec.game)?;
+        spec.validate()?;
+        let game = match self.registry.resolve(&spec.game) {
+            Ok(g) => g,
+            Err(e) => {
+                // Unknown game remains in Created so host can be used or destroyed cleanly
+                return Err(e);
+            }
+        };
         validate_descriptor_limits(game.as_ref(), &spec)?;
         let commitments = CommitmentChain::new(&spec)?;
-        let simulation = game.create(spec)?;
+        let simulation = match game.create(spec) {
+            Ok(s) => s,
+            Err(e) => {
+                self.lifecycle = HostLifecycle::Failed;
+                return Err(e);
+            }
+        };
         self.session = Some(Session {
             simulation,
             commitments,
@@ -144,8 +167,8 @@ impl EngineHost {
             self.session = None;
         } else {
             self.lifecycle =
-                if result.as_ref().is_ok_and(|frame| frame.frame.terminal) {
-                    HostLifecycle::Terminal
+                if result.as_ref().is_ok_and(|frame| frame.terminal) {
+                    HostLifecycle::Completed
                 } else {
                     HostLifecycle::Running
                 };
@@ -174,7 +197,15 @@ impl EngineHost {
             &state,
             &frame.public_snapshot,
         )?;
-        Ok(HostFrame { frame, commitments })
+        Ok(HostFrame {
+            tick: frame.tick,
+            public_snapshot: frame.public_snapshot,
+            observations: frame.observations,
+            events: frame.events,
+            terminal: frame.terminal,
+            result: frame.result,
+            commitments,
+        })
     }
 
     pub fn advance(
@@ -185,7 +216,7 @@ impl EngineHost {
         if self.lifecycle != HostLifecycle::Running {
             return Err(SimError::new(
                 "invalid_lifecycle",
-                "advance is only valid in running state",
+                format!("advance is only valid in running state, current state is {:?}", self.lifecycle),
             ));
         }
         let session = self.session.as_mut().ok_or_else(|| {
@@ -200,16 +231,28 @@ impl EngineHost {
                 ),
             ));
         }
-        if expected_tick >= session.simulation.spec().max_ticks {
+        if expected_tick >= session.simulation.spec().limits.max_ticks {
             return Err(SimError::new(
                 "tick_out_of_range",
                 format!("tick {expected_tick} exceeds max_ticks"),
             ));
         }
+
+        // Validate batch slots before calling simulation to prevent partial state mutation
         validate_action_slots(session.simulation.spec(), actions)?;
-        let frame = session.simulation.advance(actions)?;
+
+        let frame = match session.simulation.advance(actions) {
+            Ok(f) => f,
+            Err(e) => {
+                self.lifecycle = HostLifecycle::Failed;
+                self.session = None;
+                return Err(e);
+            }
+        };
+
         if frame.tick != expected_tick + 1 {
             self.lifecycle = HostLifecycle::Failed;
+            self.session = None;
             return Err(SimError::new(
                 "invalid_game_tick",
                 format!(
@@ -219,33 +262,61 @@ impl EngineHost {
                 ),
             ));
         }
-        let state = session.simulation.canonical_authoritative_state()?;
-        let commitments = session.commitments.commit(
+
+        let state = match session.simulation.canonical_authoritative_state() {
+            Ok(s) => s,
+            Err(e) => {
+                self.lifecycle = HostLifecycle::Failed;
+                self.session = None;
+                return Err(e);
+            }
+        };
+
+        let commitments = match session.commitments.commit(
             frame.tick,
             actions,
             &state,
             &frame.public_snapshot,
-        )?;
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                self.lifecycle = HostLifecycle::Failed;
+                self.session = None;
+                return Err(e);
+            }
+        };
+
         session.current_tick = frame.tick;
         if frame.terminal {
-            self.lifecycle = HostLifecycle::Terminal;
+            self.lifecycle = HostLifecycle::Completed;
         }
-        Ok(HostFrame { frame, commitments })
+
+        Ok(HostFrame {
+            tick: frame.tick,
+            public_snapshot: frame.public_snapshot,
+            observations: frame.observations,
+            events: frame.events,
+            terminal: frame.terminal,
+            result: frame.result,
+            commitments,
+        })
     }
 }
 
 fn validate_descriptor_limits(
     game: &dyn GameModule,
-    spec: &SimulationSpec,
+    spec: &ExecutionSpec,
 ) -> Result<(), SimError> {
     let descriptor = game.descriptor();
     let players = spec.slots.len() as u32;
-    if players < descriptor.min_players || players > descriptor.max_players {
+    if players < descriptor.players.minimum
+        || players > descriptor.players.maximum
+    {
         return Err(SimError::new(
             "invalid_player_count",
             format!(
                 "game accepts {}..={} players, got {players}",
-                descriptor.min_players, descriptor.max_players
+                descriptor.players.minimum, descriptor.players.maximum
             ),
         ));
     }
@@ -253,11 +324,12 @@ fn validate_descriptor_limits(
 }
 
 fn validate_action_slots(
-    spec: &SimulationSpec,
+    spec: &ExecutionSpec,
     actions: &ActionBatch,
 ) -> Result<(), SimError> {
+    let allowed_slots: Vec<String> = spec.slot_ids();
     if let Some(unknown) =
-        actions.keys().find(|slot| !spec.slots.contains(slot))
+        actions.keys().find(|slot| !allowed_slots.contains(slot))
     {
         return Err(SimError::new(
             "unknown_action_slot",
@@ -271,25 +343,55 @@ fn validate_action_slots(
 mod tests {
     use super::*;
     use agentrix_conformance_game::{
-        conformance_game_key, ConformanceGame, CONFORMANCE_GAME_DIGEST,
+        conformance_game_key, ConformanceGame, ACTION_SCHEMA_DIGEST,
+        OBSERVATION_SCHEMA_DIGEST, PUBLIC_SCHEMA_DIGEST,
     };
     use agentrix_sim_core::{
-        canonical_json_digest, ActionStatus, DeterminismTier, SlotAction,
-        TickRate, RNG_ALGORITHM,
+        canonical_json_digest, ActionStatus, DeterminismTier, ExecutionLimits,
+        ExecutionSlotSpec, SchemaDigests, SlotAction, TickRate,
+        PROTOCOL_VERSION, RNG_ALGORITHM,
     };
     use serde_json::json;
 
-    fn spec() -> SimulationSpec {
+    fn spec() -> ExecutionSpec {
         let config = json!({"target": 3});
-        SimulationSpec {
+        ExecutionSpec {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            run_id: "run-host-test".to_string(),
+            match_id: "match-host-test".to_string(),
+            engine_version: "0.3.0".to_string(),
+            engine_digest: "a".repeat(64),
+            build_identity: "test-build".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
             game: conformance_game_key(),
+            schema_digests: SchemaDigests {
+                action: ACTION_SCHEMA_DIGEST.to_string(),
+                observation: OBSERVATION_SCHEMA_DIGEST.to_string(),
+                public: PUBLIC_SCHEMA_DIGEST.to_string(),
+                replay: "f".repeat(64),
+            },
             config_digest: canonical_json_digest("conformance-config", &config)
                 .unwrap(),
             config,
             tick_rate: TickRate::new(60, 1).unwrap(),
             seed: 11,
-            slots: vec!["alpha".to_string(), "beta".to_string()],
-            max_ticks: 10,
+            slots: vec![
+                ExecutionSlotSpec {
+                    slot_id: "alpha".to_string(),
+                    artifact_digest: "1".repeat(64),
+                },
+                ExecutionSlotSpec {
+                    slot_id: "beta".to_string(),
+                    artifact_digest: "2".repeat(64),
+                },
+            ],
+            limits: ExecutionLimits {
+                max_ticks: 10,
+                max_players: 8,
+                max_entities: 100,
+                max_message_bytes: 65536,
+            },
+            failure_policy_version: "failure-policy/1".to_string(),
             determinism_tier: DeterminismTier::SameArtifactSameTarget,
             rng_algorithm: RNG_ALGORITHM.to_string(),
         }
@@ -304,8 +406,9 @@ mod tests {
     #[test]
     fn conformance_game_runs_to_completion_without_host_branches() {
         let mut host = EngineHost::new(registry());
+        assert_eq!(host.lifecycle(), HostLifecycle::Created);
         let initial = host.initialize(spec()).unwrap();
-        assert_eq!(initial.frame.tick, 0);
+        assert_eq!(initial.tick, 0);
         assert_eq!(host.lifecycle(), HostLifecycle::Running);
 
         let mut actions = ActionBatch::new();
@@ -321,20 +424,19 @@ mod tests {
                 },
             );
             let frame = host.advance(tick, &actions).unwrap();
-            assert_eq!(frame.frame.tick, tick + 1);
+            assert_eq!(frame.tick, tick + 1);
         }
-        assert_eq!(host.lifecycle(), HostLifecycle::Terminal);
+        assert_eq!(host.lifecycle(), HostLifecycle::Completed);
     }
 
     #[test]
     fn exact_game_triple_is_required_before_state_creation() {
         let mut bad = spec();
-        bad.game.game_digest = "wrong".to_string();
+        bad.game.game_digest = "f".repeat(64);
         let mut host = EngineHost::new(registry());
         let error = host.initialize(bad).unwrap_err();
         assert_eq!(error.code, "unknown_game");
-        assert_eq!(host.lifecycle(), HostLifecycle::Ready);
-        assert_ne!(CONFORMANCE_GAME_DIGEST, "wrong");
+        assert_eq!(host.lifecycle(), HostLifecycle::Created);
     }
 
     #[test]
@@ -345,6 +447,71 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "duplicate_game");
         assert_eq!(registry.descriptors().len(), 1);
+    }
+
+    #[test]
+    fn advance_with_unknown_slot_is_rejected_without_transition() {
+        let mut host = EngineHost::new(registry());
+        host.initialize(spec()).unwrap();
+        assert_eq!(host.lifecycle(), HostLifecycle::Running);
+
+        let mut bad_actions = ActionBatch::new();
+        bad_actions.insert(
+            "unknown_player".to_string(),
+            SlotAction {
+                status: ActionStatus::Valid,
+                requested: Some(json!({"increment": 1})),
+                applied: Some(json!({"increment": 1})),
+                policy_decision: "apply".to_string(),
+                error_code: None,
+            },
+        );
+        let err = host.advance(0, &bad_actions).unwrap_err();
+        assert_eq!(err.code, "unknown_action_slot");
+        // State remains Running because advance was rejected before simulation execution
+        assert_eq!(host.lifecycle(), HostLifecycle::Running);
+
+        // Now valid action works fine
+        let mut good_actions = ActionBatch::new();
+        good_actions.insert(
+            "alpha".to_string(),
+            SlotAction {
+                status: ActionStatus::Valid,
+                requested: Some(json!({"increment": 1})),
+                applied: Some(json!({"increment": 1})),
+                policy_decision: "apply".to_string(),
+                error_code: None,
+            },
+        );
+        let frame = host.advance(0, &good_actions).unwrap();
+        assert_eq!(frame.tick, 1);
+    }
+
+    #[test]
+    fn fatal_failure_in_simulation_transitions_to_failed_and_rejects_retry() {
+        let mut host = EngineHost::new(registry());
+        host.initialize(spec()).unwrap();
+        assert_eq!(host.lifecycle(), HostLifecycle::Running);
+
+        // Action with out of bounds payload triggers error inside simulation.advance
+        let mut fatal_actions = ActionBatch::new();
+        fatal_actions.insert(
+            "alpha".to_string(),
+            SlotAction {
+                status: ActionStatus::Valid,
+                requested: Some(json!({"increment": 999})),
+                applied: Some(json!({"increment": 999})),
+                policy_decision: "apply".to_string(),
+                error_code: None,
+            },
+        );
+        let err = host.advance(0, &fatal_actions).unwrap_err();
+        assert_eq!(err.code, "action_out_of_bounds");
+        assert_eq!(host.lifecycle(), HostLifecycle::Failed);
+
+        // Retry must fail with invalid_lifecycle
+        let retry_err = host.advance(0, &ActionBatch::new()).unwrap_err();
+        assert_eq!(retry_err.code, "invalid_lifecycle");
     }
 
     #[test]

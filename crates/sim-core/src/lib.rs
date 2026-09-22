@@ -4,12 +4,15 @@
 //! renderer dependency. Games validate their own payloads and expose only
 //! canonical state plus opaque JSON views at this boundary.
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::Error as DeError, Deserialize, Deserializer, Serialize, Serializer,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
+pub const PROTOCOL_VERSION: &str = "agentrix-engine/2";
 pub const CANONICAL_ENCODING_VERSION: &str = "agentrix-canonical/1";
 pub const RNG_ALGORITHM: &str = "xoshiro256starstar/1";
 
@@ -42,19 +45,36 @@ impl std::error::Error for SimError {}
 #[serde(transparent)]
 pub struct StableEntityId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Validates that a string is a 64-character lowercase hexadecimal sha256 string.
+pub fn is_valid_sha256(s: &str) -> bool {
+    s.len() == 64
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TickRate {
     pub numerator: u32,
     pub denominator: u32,
 }
 
 impl TickRate {
+    pub const SIXTY_HZ: TickRate = TickRate {
+        numerator: 60,
+        denominator: 1,
+    };
+
     pub fn new(numerator: u32, denominator: u32) -> Result<Self, SimError> {
         if numerator == 0 || denominator == 0 {
             return Err(SimError::new(
                 "invalid_tick_rate",
                 "tick-rate numerator and denominator must be positive",
+            ));
+        }
+        if numerator > 10_000 || denominator > 10_000 {
+            return Err(SimError::new(
+                "invalid_tick_rate",
+                "tick-rate numerator and denominator must not exceed 10000",
             ));
         }
         let gcd = gcd(numerator, denominator);
@@ -69,6 +89,40 @@ impl TickRate {
     }
 }
 
+impl Serialize for TickRate {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct RawTickRate {
+            numerator: u32,
+            denominator: u32,
+        }
+        RawTickRate {
+            numerator: self.numerator,
+            denominator: self.denominator,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TickRate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTickRate {
+            numerator: u32,
+            denominator: u32,
+        }
+        let raw = RawTickRate::deserialize(deserializer)?;
+        TickRate::new(raw.numerator, raw.denominator).map_err(D::Error::custom)
+    }
+}
+
 fn gcd(mut left: u32, mut right: u32) -> u32 {
     while right != 0 {
         let remainder = left % right;
@@ -79,11 +133,127 @@ fn gcd(mut left: u32, mut right: u32) -> u32 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GameKey {
     pub game_id: String,
     pub game_version: String,
     pub game_digest: String,
+}
+
+impl GameKey {
+    pub fn validate(&self) -> Result<(), SimError> {
+        if self.game_id.trim().is_empty() {
+            return Err(SimError::new(
+                "invalid_game_key",
+                "game_id must not be empty",
+            ));
+        }
+        if self.game_version.trim().is_empty() {
+            return Err(SimError::new(
+                "invalid_game_key",
+                "game_version must not be empty",
+            ));
+        }
+        if !is_valid_sha256(&self.game_digest) {
+            return Err(SimError::new(
+                "invalid_game_key",
+                "game_digest must be a 64-character lowercase hex sha256",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SchemaDigests {
+    pub action: String,
+    pub observation: String,
+    pub public: String,
+    pub replay: String,
+}
+
+impl SchemaDigests {
+    pub fn validate(&self) -> Result<(), SimError> {
+        for (name, digest) in [
+            ("action", &self.action),
+            ("observation", &self.observation),
+            ("public", &self.public),
+            ("replay", &self.replay),
+        ] {
+            if !is_valid_sha256(digest) {
+                return Err(SimError::new(
+                    "invalid_schema_digest",
+                    format!("{name} schema digest must be a 64-character lowercase hex sha256"),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionSlotSpec {
+    pub slot_id: String,
+    pub artifact_digest: String,
+}
+
+impl ExecutionSlotSpec {
+    pub fn validate(&self) -> Result<(), SimError> {
+        if self.slot_id.trim().is_empty() {
+            return Err(SimError::new(
+                "invalid_slot",
+                "slot_id must not be empty",
+            ));
+        }
+        if !is_valid_sha256(&self.artifact_digest) {
+            return Err(SimError::new(
+                "invalid_slot",
+                "artifact_digest must be a 64-character lowercase hex sha256",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionLimits {
+    pub max_ticks: u64,
+    pub max_players: u32,
+    pub max_entities: u32,
+    pub max_message_bytes: u32,
+}
+
+impl ExecutionLimits {
+    pub fn validate(&self) -> Result<(), SimError> {
+        if self.max_ticks == 0 {
+            return Err(SimError::new(
+                "invalid_limits",
+                "max_ticks must be positive",
+            ));
+        }
+        if self.max_players == 0 || self.max_players > 64 {
+            return Err(SimError::new(
+                "invalid_limits",
+                "max_players must be between 1 and 64",
+            ));
+        }
+        if self.max_entities == 0 {
+            return Err(SimError::new(
+                "invalid_limits",
+                "max_entities must be positive",
+            ));
+        }
+        if self.max_message_bytes < 1024 {
+            return Err(SimError::new(
+                "invalid_limits",
+                "max_message_bytes must be at least 1024",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,31 +264,126 @@ pub enum DeterminismTier {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SimulationSpec {
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionSpec {
+    pub protocol_version: String,
+    pub run_id: String,
+    pub match_id: String,
+    pub engine_version: String,
+    pub engine_digest: String,
+    pub build_identity: String,
+    pub target: String,
     pub game: GameKey,
+    pub schema_digests: SchemaDigests,
     pub config: Value,
     pub config_digest: String,
     pub tick_rate: TickRate,
     pub seed: u64,
-    pub slots: Vec<String>,
-    pub max_ticks: u64,
+    pub slots: Vec<ExecutionSlotSpec>,
+    pub limits: ExecutionLimits,
+    pub failure_policy_version: String,
     pub determinism_tier: DeterminismTier,
     pub rng_algorithm: String,
 }
 
-impl SimulationSpec {
-    pub fn validate_common(&self) -> Result<(), SimError> {
+impl ExecutionSpec {
+    pub fn slot_ids(&self) -> Vec<String> {
+        self.slots.iter().map(|s| s.slot_id.clone()).collect()
+    }
+
+    pub fn validate(&self) -> Result<(), SimError> {
+        if self.protocol_version != PROTOCOL_VERSION {
+            return Err(SimError::new(
+                "invalid_protocol_version",
+                format!(
+                    "expected protocol_version {PROTOCOL_VERSION}, got {}",
+                    self.protocol_version
+                ),
+            ));
+        }
+        if self.run_id.trim().is_empty() {
+            return Err(SimError::new(
+                "invalid_spec",
+                "run_id must not be empty",
+            ));
+        }
+        if self.match_id.trim().is_empty() {
+            return Err(SimError::new(
+                "invalid_spec",
+                "match_id must not be empty",
+            ));
+        }
+        if self.engine_version.trim().is_empty() {
+            return Err(SimError::new(
+                "invalid_spec",
+                "engine_version must not be empty",
+            ));
+        }
+        if !is_valid_sha256(&self.engine_digest) {
+            return Err(SimError::new(
+                "invalid_engine_digest",
+                "engine_digest must be a 64-character lowercase hex sha256",
+            ));
+        }
+        if self.build_identity.trim().is_empty() {
+            return Err(SimError::new(
+                "invalid_spec",
+                "build_identity must not be empty",
+            ));
+        }
+        if self.target.trim().is_empty() {
+            return Err(SimError::new(
+                "invalid_spec",
+                "target must not be empty",
+            ));
+        }
+        self.game.validate()?;
+        self.schema_digests.validate()?;
+        if !self.config.is_object() {
+            return Err(SimError::new(
+                "invalid_config",
+                "config must be a JSON object",
+            ));
+        }
+        if !is_valid_sha256(&self.config_digest) {
+            return Err(SimError::new(
+                "invalid_config_digest",
+                "config_digest must be a 64-character lowercase hex sha256",
+            ));
+        }
+        self.limits.validate()?;
         if self.slots.is_empty() {
             return Err(SimError::new(
                 "invalid_slots",
                 "at least one slot is required",
             ));
         }
-        if self.max_ticks == 0 {
+        if self.slots.len() > self.limits.max_players as usize {
             return Err(SimError::new(
-                "invalid_max_ticks",
-                "max_ticks must be positive",
+                "invalid_slots",
+                format!(
+                    "slot count {} exceeds max_players {}",
+                    self.slots.len(),
+                    self.limits.max_players
+                ),
+            ));
+        }
+        for slot in &self.slots {
+            slot.validate()?;
+        }
+        let mut slot_ids = self.slot_ids();
+        slot_ids.sort();
+        slot_ids.dedup();
+        if slot_ids.len() != self.slots.len() {
+            return Err(SimError::new(
+                "invalid_slots",
+                "slot identifiers must be unique",
+            ));
+        }
+        if self.failure_policy_version.trim().is_empty() {
+            return Err(SimError::new(
+                "invalid_spec",
+                "failure_policy_version must not be empty",
             ));
         }
         if self.rng_algorithm != RNG_ALGORITHM {
@@ -130,20 +395,15 @@ impl SimulationSpec {
                 ),
             ));
         }
-        let mut sorted = self.slots.clone();
-        sorted.sort();
-        sorted.dedup();
-        if sorted.len() != self.slots.len()
-            || self.slots.iter().any(|slot| slot.trim().is_empty())
-        {
-            return Err(SimError::new(
-                "invalid_slots",
-                "slot identifiers must be non-empty and unique",
-            ));
-        }
         Ok(())
     }
+
+    pub fn digest(&self) -> Result<String, SimError> {
+        execution_spec_digest(self)
+    }
 }
+
+pub type SimulationSpec = ExecutionSpec;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -156,7 +416,7 @@ pub enum ActionStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SlotAction {
     pub status: ActionStatus,
     pub requested: Option<Value>,
@@ -168,7 +428,7 @@ pub struct SlotAction {
 pub type ActionBatch = BTreeMap<String, SlotAction>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SimulationFrame {
     pub tick: u64,
     pub public_snapshot: Value,
@@ -179,19 +439,31 @@ pub struct SimulationFrame {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GamePlayerLimits {
+    pub minimum: u32,
+    pub maximum: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GameSchemaDigests {
+    pub action: String,
+    pub observation: String,
+    pub public: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GameDescriptor {
     pub key: GameKey,
-    pub min_players: u32,
-    pub max_players: u32,
-    pub action_schema_digest: String,
-    pub observation_schema_digest: String,
-    pub public_schema_digest: String,
+    pub players: GamePlayerLimits,
+    pub schemas: GameSchemaDigests,
     pub capabilities: Vec<String>,
 }
 
 pub trait Simulation {
-    fn spec(&self) -> &SimulationSpec;
+    fn spec(&self) -> &ExecutionSpec;
     fn initial_frame(&mut self) -> Result<SimulationFrame, SimError>;
     fn advance(
         &mut self,
@@ -204,7 +476,7 @@ pub trait GameModule: Send + Sync {
     fn descriptor(&self) -> &GameDescriptor;
     fn create(
         &self,
-        spec: SimulationSpec,
+        spec: ExecutionSpec,
     ) -> Result<Box<dyn Simulation>, SimError>;
 }
 
@@ -354,13 +626,17 @@ pub fn canonical_json_digest(
     Ok(sha256_hex(domain, &[&encoder.into_bytes()]))
 }
 
-pub fn simulation_spec_digest(
-    spec: &SimulationSpec,
-) -> Result<String, SimError> {
+pub fn execution_spec_digest(spec: &ExecutionSpec) -> Result<String, SimError> {
     let value = serde_json::to_value(spec).map_err(|error| {
         SimError::new("spec_serialization_failed", error.to_string())
     })?;
-    canonical_json_digest("agentrix.execution-spec/1", &value)
+    canonical_json_digest("agentrix.execution-spec/2", &value)
+}
+
+pub fn simulation_spec_digest(
+    spec: &ExecutionSpec,
+) -> Result<String, SimError> {
+    execution_spec_digest(spec)
 }
 
 pub fn action_batch_digest(
@@ -380,7 +656,7 @@ pub fn action_batch_digest(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StateCommitments {
     pub execution_spec_digest: String,
     pub action_batch_digest: String,
@@ -397,8 +673,8 @@ pub struct CommitmentChain {
 }
 
 impl CommitmentChain {
-    pub fn new(spec: &SimulationSpec) -> Result<Self, SimError> {
-        let execution_spec_digest = simulation_spec_digest(spec)?;
+    pub fn new(spec: &ExecutionSpec) -> Result<Self, SimError> {
+        let execution_spec_digest = execution_spec_digest(spec)?;
         let previous_state = digest_bytes(
             "agentrix.authoritative-state/genesis",
             &[execution_spec_digest.as_bytes()],
@@ -565,27 +841,56 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn spec() -> SimulationSpec {
+    fn sample_spec() -> ExecutionSpec {
         let config = json!({"difficulty": 2, "nested": {"enabled": true}});
-        SimulationSpec {
+        ExecutionSpec {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            run_id: "run-test-1".to_string(),
+            match_id: "match-test-1".to_string(),
+            engine_version: "0.3.0".to_string(),
+            engine_digest: "a".repeat(64),
+            build_identity: "test-build".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
             game: GameKey {
                 game_id: "test".to_string(),
                 game_version: "1".to_string(),
-                game_digest: "test-digest".to_string(),
+                game_digest: "b".repeat(64),
             },
-            config_digest: canonical_json_digest("config", &config).unwrap(),
+            schema_digests: SchemaDigests {
+                action: "c".repeat(64),
+                observation: "d".repeat(64),
+                public: "e".repeat(64),
+                replay: "f".repeat(64),
+            },
+            config_digest: canonical_json_digest("test-config", &config)
+                .unwrap(),
             config,
             tick_rate: TickRate::new(60, 1).unwrap(),
             seed: 7,
-            slots: vec!["alpha".to_string(), "beta".to_string()],
-            max_ticks: 10,
+            slots: vec![
+                ExecutionSlotSpec {
+                    slot_id: "alpha".to_string(),
+                    artifact_digest: "1".repeat(64),
+                },
+                ExecutionSlotSpec {
+                    slot_id: "beta".to_string(),
+                    artifact_digest: "2".repeat(64),
+                },
+            ],
+            limits: ExecutionLimits {
+                max_ticks: 10,
+                max_players: 2,
+                max_entities: 100,
+                max_message_bytes: 65536,
+            },
+            failure_policy_version: "failure-policy/1".to_string(),
             determinism_tier: DeterminismTier::SameArtifactSameTarget,
             rng_algorithm: RNG_ALGORITHM.to_string(),
         }
     }
 
     #[test]
-    fn tick_rate_is_reduced_and_rejects_zero() {
+    fn tick_rate_is_reduced_and_rejects_zero_and_overflow() {
         assert_eq!(
             TickRate::new(120, 2).unwrap(),
             TickRate {
@@ -595,6 +900,106 @@ mod tests {
         );
         assert!(TickRate::new(0, 1).is_err());
         assert!(TickRate::new(60, 0).is_err());
+        assert!(TickRate::new(10_001, 1).is_err());
+        assert!(TickRate::new(1, 10_001).is_err());
+
+        // Serde deserialization auto-reduces and validates
+        let json_data = r#"{"numerator": 120, "denominator": 2}"#;
+        let tr: TickRate = serde_json::from_str(json_data).unwrap();
+        assert_eq!(tr.numerator, 60);
+        assert_eq!(tr.denominator, 1);
+
+        let bad_json = r#"{"numerator": 0, "denominator": 1}"#;
+        assert!(serde_json::from_str::<TickRate>(bad_json).is_err());
+
+        let unknown_field =
+            r#"{"numerator": 60, "denominator": 1, "extra": 1}"#;
+        assert!(serde_json::from_str::<TickRate>(unknown_field).is_err());
+    }
+
+    #[test]
+    fn golden_execution_spec_matches_fixture() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let fixture_path = std::path::Path::new(manifest_dir)
+            .join("../../contracts/fixtures/execution_spec_golden.json");
+        let fixture_bytes = std::fs::read(&fixture_path).unwrap_or_else(|e| {
+            panic!("failed to read fixture at {:?}: {}", fixture_path, e)
+        });
+        let spec: ExecutionSpec =
+            serde_json::from_slice(&fixture_bytes).unwrap();
+        spec.validate().unwrap();
+        let digest = execution_spec_digest(&spec).unwrap();
+        assert_eq!(
+            digest,
+            "18568c8b3fab8f4d45a9d87f2ff39df18871d37c75117f011f51aadf879d4e72"
+        );
+    }
+
+    #[test]
+    fn spec_validation_and_tamper_detection() {
+        let spec = sample_spec();
+        assert!(spec.validate().is_ok());
+
+        let mut bad_protocol = spec.clone();
+        bad_protocol.protocol_version = "agentrix-engine/1".to_string();
+        assert_eq!(
+            bad_protocol.validate().unwrap_err().code,
+            "invalid_protocol_version"
+        );
+
+        let mut bad_engine_digest = spec.clone();
+        bad_engine_digest.engine_digest = "short".to_string();
+        assert_eq!(
+            bad_engine_digest.validate().unwrap_err().code,
+            "invalid_engine_digest"
+        );
+
+        let mut bad_slots = spec.clone();
+        bad_slots.slots.clear();
+        assert_eq!(bad_slots.validate().unwrap_err().code, "invalid_slots");
+
+        let mut dup_slots = spec.clone();
+        dup_slots.slots[1].slot_id = "alpha".to_string();
+        assert_eq!(dup_slots.validate().unwrap_err().code, "invalid_slots");
+
+        let mut bad_rng = spec.clone();
+        bad_rng.rng_algorithm = "other".to_string();
+        assert_eq!(bad_rng.validate().unwrap_err().code, "unsupported_rng");
+    }
+
+    #[test]
+    fn alter_any_field_changes_spec_digest() {
+        let baseline = sample_spec();
+        let base_digest = execution_spec_digest(&baseline).unwrap();
+
+        let mut changed_seed = baseline.clone();
+        changed_seed.seed += 1;
+        assert_ne!(base_digest, execution_spec_digest(&changed_seed).unwrap());
+
+        let mut changed_tick_rate = baseline.clone();
+        changed_tick_rate.tick_rate = TickRate::new(30, 1).unwrap();
+        assert_ne!(
+            base_digest,
+            execution_spec_digest(&changed_tick_rate).unwrap()
+        );
+
+        let mut changed_slot_digest = baseline.clone();
+        changed_slot_digest.slots[0].artifact_digest = "9".repeat(64);
+        assert_ne!(
+            base_digest,
+            execution_spec_digest(&changed_slot_digest).unwrap()
+        );
+
+        let mut changed_config = baseline.clone();
+        changed_config.config =
+            json!({"difficulty": 3, "nested": {"enabled": true}});
+        changed_config.config_digest =
+            canonical_json_digest("test-config", &changed_config.config)
+                .unwrap();
+        assert_ne!(
+            base_digest,
+            execution_spec_digest(&changed_config).unwrap()
+        );
     }
 
     #[test]
@@ -631,7 +1036,7 @@ mod tests {
 
     #[test]
     fn hidden_state_and_actions_change_separate_commitments() {
-        let spec = spec();
+        let spec = sample_spec();
         let mut first = CommitmentChain::new(&spec).unwrap();
         let mut second = CommitmentChain::new(&spec).unwrap();
         let public = json!({"tick": 1, "score": 0});

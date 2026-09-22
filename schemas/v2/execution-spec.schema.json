@@ -5,8 +5,10 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "protocolVersion",
     "runId",
     "matchId",
+    "engineVersion",
     "engineDigest",
     "buildIdentity",
     "target",
@@ -23,8 +25,10 @@
     "rngAlgorithm"
   ],
   "properties": {
+    "protocolVersion": {"const": "agentrix-engine/2"},
     "runId": {"type": "string", "minLength": 1, "maxLength": 128},
     "matchId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "engineVersion": {"type": "string", "minLength": 1, "maxLength": 64},
     "engineDigest": {"$ref": "#/$defs/sha256"},
     "buildIdentity": {"type": "string", "minLength": 1, "maxLength": 256},
     "target": {"type": "string", "minLength": 1, "maxLength": 128},

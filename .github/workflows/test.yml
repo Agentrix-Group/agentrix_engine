@@ -10,21 +10,32 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      # Checkout code
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt install libasound2-dev libudev-dev pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
 
-      # Formatting check
+      - name: Set up Rust toolchain from rust-toolchain.toml
+        uses: dtolnay/rust-toolchain@master
+
       - name: Formatting
-        run: cargo fmt --check
+        run: cargo fmt --all -- --check
 
-      # Clippy linter
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-      # Unit testing
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace --all-targets
+
+      - name: Multi-process Determinism (D1/D2)
+        run: cargo test --locked --test process_determinism -- --nocapture
+
+      - name: Release Build Workspace
+        run: cargo build --locked --release --workspace
+
+      - name: Competitive Binary Smoke Test
+        run: |
+          ./target/release/starfighter-engine --version || ./target/release/conformance-runner conformance
