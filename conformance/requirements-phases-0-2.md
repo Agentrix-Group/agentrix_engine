@@ -3,7 +3,7 @@
 | Requisito | Código/artefacto | Prueba o comando | Evidencia esperada |
 | --- | --- | --- | --- |
 | Baseline reproducible | `Cargo.lock`, `rust-toolchain.toml`, `conformance/baseline/` | `cargo test --workspace --all-targets --locked --offline` | suites y métricas ligadas a commits/toolchain |
-| Host sin tipos concretos | `crates/engine-host` | `rg 'FighterAction|StarfighterConfig|bevy::|avian2d' crates/engine-host` | cero coincidencias |
+| Host sin tipos concretos | `crates/engine-host` | `rg 'FighterAction|StarfighterConfig|bevy::|avian2d|rapier2d' crates/engine-host` | cero coincidencias |
 | Registry por triple exacta | `GameRegistry` | `exact_game_triple_is_required_before_state_creation` | digest incorrecto falla antes de crear estado |
 | Segundo juego sin física | `crates/games/conformance-game` | `conformance_game_runs_to_completion_without_host_branches` | partida completa por el host común |
 | Tick como razón exacta | `TickRate` | `tick_rate_is_reduced_and_rejects_zero` | razón reducida, cero rechazado |

@@ -2,6 +2,7 @@ use agentrix_conformance_game::{conformance_game_key, ConformanceGame};
 use agentrix_engine_host::{EngineHost, GameRegistry};
 use agentrix_sim_core::{
     canonical_json_digest, ActionBatch, ActionStatus, DeterminismTier,
+    DeterministicRng,
     ExecutionLimits, ExecutionSlotSpec, SchemaDigests, SimulationSpec,
     SlotAction, StateCommitments, TickRate, PROTOCOL_VERSION, RNG_ALGORITHM,
 };
@@ -18,6 +19,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let commitments = match game.as_str() {
         "conformance" => run_conformance()?,
         "starfighter" => run_starfighter()?,
+        "starfighter-long" => {
+            let (ticks, last) = run_starfighter_long()?;
+            println!(
+                "{}",
+                serde_json::to_string(&json!({"ticks": ticks, "last": last}))?
+            );
+            return Ok(());
+        }
         other => return Err(format!("unknown vector {other}").into()),
     };
     println!("{}", serde_json::to_string(&commitments)?);
@@ -77,12 +86,15 @@ fn run_conformance() -> Result<Vec<StateCommitments>, Box<dyn Error>> {
     Ok(output)
 }
 
-fn run_starfighter() -> Result<Vec<StateCommitments>, Box<dyn Error>> {
+fn starfighter_spec(
+    asteroid_count: u32,
+    max_ticks: u64,
+) -> Result<SimulationSpec, Box<dyn Error>> {
     let config = serde_json::to_value(StarfighterConfig {
-        asteroid_count: 1,
+        asteroid_count,
         ..StarfighterConfig::default()
     })?;
-    let spec = SimulationSpec {
+    Ok(SimulationSpec {
         protocol_version: PROTOCOL_VERSION.to_string(),
         run_id: "starfighter-run-1".to_string(),
         match_id: "starfighter-match-1".to_string(),
@@ -112,7 +124,7 @@ fn run_starfighter() -> Result<Vec<StateCommitments>, Box<dyn Error>> {
             },
         ],
         limits: ExecutionLimits {
-            max_ticks: 8,
+            max_ticks,
             max_players: 2,
             max_entities: 10_000,
             max_message_bytes: 1024 * 1024,
@@ -120,7 +132,11 @@ fn run_starfighter() -> Result<Vec<StateCommitments>, Box<dyn Error>> {
         failure_policy_version: "fail-closed/1".to_string(),
         determinism_tier: DeterminismTier::SameArtifactSameTarget,
         rng_algorithm: RNG_ALGORITHM.to_string(),
-    };
+    })
+}
+
+fn run_starfighter() -> Result<Vec<StateCommitments>, Box<dyn Error>> {
+    let spec = starfighter_spec(1, 8)?;
     let mut registry = GameRegistry::new();
     registry.register(Arc::new(StarfighterGame::new()))?;
     let mut host = EngineHost::new(registry);
@@ -141,6 +157,45 @@ fn run_starfighter() -> Result<Vec<StateCommitments>, Box<dyn Error>> {
         output.push(host.advance(tick, &actions)?.commitments);
     }
     Ok(output)
+}
+
+/// Partida completa de hasta 3600 ticks (60 s a 60 Hz) con 5 asteroides y
+/// acciones pseudoaleatorias sembradas. Devuelve los ticks jugados y el
+/// último commitment: su `replayChainDigest` encadena todos los anteriores,
+/// así que dos procesos con la misma salida coinciden en cada tick.
+fn run_starfighter_long() -> Result<(u64, StateCommitments), Box<dyn Error>>
+{
+    const MAX_TICKS: u64 = 3600;
+    let spec = starfighter_spec(5, MAX_TICKS)?;
+    let mut registry = GameRegistry::new();
+    registry.register(Arc::new(StarfighterGame::new()))?;
+    let mut host = EngineHost::new(registry);
+    let mut last = host.initialize(spec)?.commitments;
+    let mut rng = DeterministicRng::from_seed(23);
+    let mut ticks = 0;
+    for tick in 0..MAX_TICKS {
+        let mut actions = ActionBatch::new();
+        for slot in ["alpha", "beta"] {
+            let thrust = ["FORWARD", "OFF", "BRAKE"][rng.range_u32(0, 3)? as usize];
+            let turn = ["LEFT", "RIGHT", "NONE"][rng.range_u32(0, 3)? as usize];
+            actions.insert(
+                slot.to_string(),
+                outcome(json!({
+                    "thrust": thrust,
+                    "turn": turn,
+                    "shoot": rng.probability(0.85)?,
+                    "shield": rng.probability(0.2)?,
+                })),
+            );
+        }
+        let step = host.advance(tick, &actions)?;
+        last = step.commitments;
+        ticks = tick + 1;
+        if step.terminal {
+            break;
+        }
+    }
+    Ok((ticks, last))
 }
 
 fn outcome(action: serde_json::Value) -> SlotAction {

@@ -1,7 +1,8 @@
-//! Núcleo físico mínimo de starfighter sobre Avian2D + Bevy headless.
+//! Núcleo físico mínimo de starfighter sobre Rapier2D + Bevy headless.
 //!
 //! Estado de la migración a Agentrix:
-//! - Fase 0: motor sobre Avian2D, sin `entity-gym-rs`/`pyo3`, CCD real.
+//! - Fase 0: motor sin `entity-gym-rs`/`pyo3`; desde ADR-0013 la física es
+//!   `rapier2d` directo (ver `physics`).
 //! - Fase 1: modelo de nave único (HP/energía/escudo), condición de fin
 //!   de partida simétrica.
 //! - contratos autoritativos mantenidos por el repositorio Agentrix;
@@ -17,12 +18,16 @@
 //! ninguna rama por `player_id` en todo este archivo.
 
 use agentrix_sim_core::{DeterministicRng, StableEntityId};
-use avian2d::prelude::*;
 use bevy::prelude::*;
+pub use physics::{
+    AngularVelocity, Contact, LinearVelocity, Physics, PhysicsBody,
+    PhysicsHandle, PhysicsShape, ThrustForce, TickContacts, BULLET_RADIUS,
+};
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 
 pub mod game_module;
+pub mod physics;
 pub mod protocol;
 pub mod stdio_server;
 
@@ -140,7 +145,6 @@ pub struct Settings {
     pub tick_rate: agentrix_sim_core::TickRate,
     pub players: u32,
     pub asteroid_count: u32,
-    pub continuous_collision_detection: bool,
     pub config: StarfighterConfig,
     pub max_entities: u64,
 }
@@ -153,7 +157,6 @@ impl Default for Settings {
             tick_rate: agentrix_sim_core::TickRate::SIXTY_HZ,
             players: 2,
             asteroid_count: config.asteroid_count,
-            continuous_collision_detection: true,
             config,
             max_entities: 10_000,
         }
@@ -548,40 +551,60 @@ impl DerefMut for RngState {
     }
 }
 
+/// `false` durante el `update()` de Startup, `true` desde el siguiente:
+/// así el primer `update()` produce State[0] y cada uno de los demás
+/// avanza exactamente un tick, sin depender del reloj de Bevy.
+#[derive(Resource, Default)]
+pub struct SimulationClock {
+    armed: bool,
+}
+
+fn arm_simulation_clock(mut clock: ResMut<SimulationClock>) {
+    clock.armed = true;
+}
+
+fn simulation_armed(clock: Res<SimulationClock>) -> bool {
+    clock.armed
+}
+
 /// Construye la app headless. Sin `DefaultPlugins`, sin ventana, sin
 /// assets: el renderer de Agentrix reconstruye la vista desde el replay,
 /// no desde este proceso (ATD-011).
+///
+/// El primer `app.update()` corre `Startup` (State[0]); cada `update()`
+/// posterior es exactamente un tick: reglas, un paso físico de
+/// `1 / tick_rate` segundos y resolución de contactos de ese mismo paso.
 pub fn build_app(settings: Settings) -> App {
     let mut app = App::new();
-    let timestep = std::time::Duration::from_secs_f64(
-        settings.tick_rate.seconds_per_tick(),
-    );
-    app.add_plugins(MinimalPlugins)
-        .add_plugins(PhysicsPlugins::default().with_length_unit(50.0))
-        .insert_resource(Time::<Fixed>::from_duration(timestep))
-        .insert_resource(Gravity(Vec2::ZERO))
-        .insert_resource(RngState(DeterministicRng::from_seed(settings.seed)))
+    app.add_plugins(MinimalPlugins);
+    physics::add_physics(&mut app, &settings);
+    app.insert_resource(RngState(DeterministicRng::from_seed(settings.seed)))
         .insert_resource(EntityIdAllocator::new(settings.max_entities))
         .init_resource::<MatchResult>()
         .init_resource::<TickEvents>()
+        .init_resource::<SimulationClock>()
         .add_message::<FighterActionMessage>()
         .add_message::<FighterDestroyed>()
         .insert_resource(settings)
         .add_observer(release_allocated_id)
         .add_systems(Startup, setup)
         .add_systems(
-            FixedUpdate,
+            Update,
             (
                 check_boundary_collision,
                 spawn_asteroids,
                 fighter_actions,
                 cooldowns,
                 expire_bullets,
+                physics::physics_insert,
+                physics::physics_step,
                 detect_collisions,
                 check_match_end,
             )
-                .chain(),
-        );
+                .chain()
+                .run_if(simulation_armed),
+        )
+        .add_systems(PostUpdate, arm_simulation_clock);
     app
 }
 
@@ -594,7 +617,7 @@ fn setup(
         let angle = i as f32 / settings.players.max(1) as f32
             * std::f32::consts::PI
             * 2.0;
-        let position = Vec2::new(angle.cos(), angle.sin())
+        let position = Vec2::new(libm::cosf(angle), libm::sinf(angle))
             * (settings.arena_half_width() * 0.6);
         spawn_fighter_with_settings(&mut cmd, i, position, &settings);
     }
@@ -625,52 +648,44 @@ pub fn spawn_fighter_with_settings(
             ..default()
         },
         EntityId(StableEntityId(player_id as u64 + 1)),
-        RigidBody::Dynamic,
-        Collider::convex_hull(vec![
-            Vec2::new(0.0, 25.0),
-            Vec2::new(-15.0, -15.0),
-            Vec2::new(15.0, -15.0),
-        ])
-        .expect("triangle is a valid convex hull"),
-        CollisionEventsEnabled,
+        PhysicsBody {
+            shape: PhysicsShape::ConvexHull(vec![
+                Vec2::new(0.0, 25.0),
+                Vec2::new(-15.0, -15.0),
+                Vec2::new(15.0, -15.0),
+            ]),
+            lock_rotation: false,
+        },
         Transform::from_translation(position.extend(0.0)),
         LinearVelocity::ZERO,
         AngularVelocity::ZERO,
-        ConstantForce::default(),
+        ThrustForce::default(),
         CollisionType::Fighter,
     ))
     .id()
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Las balas no son cuerpos rígidos: `physics_step` las mueve y barre su
+/// trayectoria de cada tick contra naves, asteroides y otras balas.
 pub fn spawn_bullet(
     cmd: &mut Commands,
-    settings: &Settings,
     position: Vec2,
     velocity: Vec2,
     lifetime: u32,
     player_id: usize,
     stable_id: StableEntityId,
 ) -> Entity {
-    let mut entity = cmd.spawn((
+    cmd.spawn((
         Bullet {
             remaining_lifetime: lifetime as i32,
             player_id,
         },
         EntityId(stable_id),
-        RigidBody::Dynamic,
-        Collider::circle(3.0),
-        LockedAxes::ROTATION_LOCKED,
         CollisionType::Bullet,
-        CollisionEventsEnabled,
         Transform::from_translation(position.extend(0.0)),
         LinearVelocity(velocity),
-        AngularVelocity::ZERO,
-    ));
-    if settings.continuous_collision_detection {
-        entity.insert(SweptCcd::default());
-    }
-    entity.id()
+    ))
+    .id()
 }
 
 fn spawn_asteroids(
@@ -695,9 +710,9 @@ fn spawn_asteroids(
         let speed = 50.0 + 250.0 * rng.unit_f32();
         let direction = std::f32::consts::TAU * rng.unit_f32();
         let spawn_angle = std::f32::consts::TAU * rng.unit_f32();
-        let radius = ((20.0 + 40.0 * rng.unit_f32())
-            * (20.0 + 40.0 * rng.unit_f32()))
-        .sqrt();
+        let radius =
+            ((20.0 + 40.0 * rng.unit_f32()) * (20.0 + 40.0 * rng.unit_f32()))
+                .sqrt();
         if let Ok(id) = ids.allocate() {
             cmd.spawn((
                 Asteroid {
@@ -706,17 +721,21 @@ fn spawn_asteroids(
                 },
                 EntityId(id),
                 AllocatedId,
-                RigidBody::Dynamic,
-                LockedAxes::ROTATION_LOCKED,
-                Collider::circle(radius),
-                CollisionEventsEnabled,
+                PhysicsBody {
+                    shape: PhysicsShape::Ball(radius),
+                    lock_rotation: true,
+                },
                 Transform::from_translation(Vec3::new(
-                    margin_x * spawn_angle.cos(),
-                    margin_y * spawn_angle.sin(),
+                    margin_x * libm::cosf(spawn_angle),
+                    margin_y * libm::sinf(spawn_angle),
                     0.0,
                 )),
                 LinearVelocity(
-                    speed * Vec2::new(direction.cos(), direction.sin()),
+                    speed
+                        * Vec2::new(
+                            libm::cosf(direction),
+                            libm::sinf(direction),
+                        ),
                 ),
                 CollisionType::Asteroid,
             ));
@@ -768,7 +787,7 @@ pub fn fighter_actions(
         &Transform,
         &mut LinearVelocity,
         &mut AngularVelocity,
-        &mut ConstantForce,
+        &mut ThrustForce,
     )>,
     mut cmd: Commands,
     settings: Res<Settings>,
@@ -803,7 +822,10 @@ pub fn fighter_actions(
             Thrust::Off => {
                 vel.0 *= 1.0
                     - fighter.drag_coef
-                        * (speed / fighter.max_velocity).powf(fighter.drag_exp);
+                        * libm::powf(
+                            speed / fighter.max_velocity,
+                            fighter.drag_exp,
+                        );
             }
             Thrust::Stop => {
                 if speed < 1.0 {
@@ -829,7 +851,6 @@ pub fn fighter_actions(
                 if let Ok(bullet_id) = ids.allocate() {
                     let bullet = spawn_bullet(
                         &mut cmd,
-                        &settings,
                         transform.translation.truncate() + facing * 24.0,
                         vel.0 + facing * fighter.bullet_speed,
                         fighter.bullet_lifetime,
@@ -849,14 +870,11 @@ pub fn fighter_actions(
     }
 }
 
+/// Dirección de la nariz de la nave: el eje +Y local rotado, es decir
+/// (-sin θ, cos θ). Se calcula del cuaternión sin trigonometría.
 fn facing_direction(transform: &Transform) -> Vec2 {
-    let (_, angle) = transform.rotation.to_axis_angle();
-    let angle = if transform.rotation.z < 0.0 {
-        -angle
-    } else {
-        angle
-    } + std::f32::consts::PI / 2.0;
-    Vec2::new(angle.cos(), angle.sin())
+    let (cos, sin) = physics::quat_to_cos_sin(transform.rotation);
+    Vec2::new(-sin, cos)
 }
 
 /// Corre para todas las naves cada tick, tengan o no un mensaje de
@@ -909,8 +927,9 @@ fn collision_pair_key(
 
 /// Aplica las reglas de contacto del tick.
 ///
-/// Los pares se procesan en orden canónico por `EntityId`, no en el orden
-/// en que el backend físico los reporta, y cada entidad consumida en el
+/// Los pares se procesan por instante de impacto dentro del tick y, a
+/// igual instante, en orden canónico por `EntityId` (nunca en el orden en
+/// que el backend físico los reporta). Cada entidad consumida en el
 /// tick (bala que impactó, asteroide destruido, nave destruida) deja de
 /// producir efectos: el despawn por `Commands` es diferido, así que sin este
 /// registro una nave podía recibir daño y emitir `Destroyed` dos veces, o
@@ -922,7 +941,7 @@ fn collision_pair_key(
 #[allow(clippy::too_many_arguments)]
 fn detect_collisions(
     mut cmd: Commands,
-    mut collisions: MessageReader<CollisionStart>,
+    contacts: Res<TickContacts>,
     collision_type: Query<&CollisionType>,
     ids: Query<&EntityId>,
     mut fighters: Query<&mut Fighter>,
@@ -932,12 +951,21 @@ fn detect_collisions(
     mut events: ResMut<TickEvents>,
     settings: Res<Settings>,
 ) {
-    let mut pairs: Vec<(Entity, Entity)> = collisions
-        .read()
-        .map(|event| (event.collider1, event.collider2))
-        .collect();
-    pairs.sort_by_key(|&(a, b)| collision_pair_key(&ids, a, b));
-    pairs.dedup_by_key(|&mut (a, b)| collision_pair_key(&ids, a, b));
+    let mut contacts: Vec<&Contact> = contacts.0.iter().collect();
+    contacts.sort_by(|x, y| {
+        x.time_of_impact.total_cmp(&y.time_of_impact).then_with(|| {
+            collision_pair_key(&ids, x.a, x.b)
+                .cmp(&collision_pair_key(&ids, y.a, y.b))
+        })
+    });
+    let mut pairs: Vec<(Entity, Entity)> = Vec::new();
+    for contact in contacts {
+        let key = collision_pair_key(&ids, contact.a, contact.b);
+        if !pairs.iter().any(|&(a, b)| collision_pair_key(&ids, a, b) == key)
+        {
+            pairs.push((contact.a, contact.b));
+        }
+    }
 
     let mut consumed: Vec<Entity> = Vec::new();
     for (a, b) in pairs {
@@ -1321,7 +1349,6 @@ pub fn build_perception(
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
-    use std::time::Duration;
 
     #[test]
     fn starfighter_config_strict_validation() {
@@ -1372,85 +1399,66 @@ mod tests {
         assert!(overflow_allocator.allocate().is_err());
     }
 
-    /// Criterio de aceptación de la Fase 0: una bala a una velocidad
-    /// realista de juego (3000 u/s, por encima del `bullet_speed`
-    /// original de 1500-2500) no atraviesa una nave sin generar colisión.
-    ///
-    /// Nota de hallazgo: a velocidades extremas (~80 000 u/s, ~40x el
-    /// ancho de la nave) tanto la detección discreta/especulativa de
-    /// Avian2D por defecto como `SweptCcd` fallan en este setup — no es
-    /// el rango realista de este juego (el original usaba 1500-2500),
-    /// así que se documenta como hallazgo de la Fase 0 y no se persigue
-    /// más en esta fase (RD-009). A la velocidad de este test, la
-    /// detección especulativa por defecto de Avian2D ya es suficiente
-    /// por sí sola; `SweptCcd` queda cableado vía
-    /// `continuous_collision_detection` para cuando haga falta.
-    #[test]
-    fn fast_bullet_does_not_tunnel_through_fighter() {
+    /// Dispara una bala del slot 1 hacia una nave del slot 0 ubicada a 500
+    /// u y devuelve cuántos impactos recibió la nave en los ticks que la
+    /// bala tarda en cruzarla (más un margen).
+    fn hits_from_bullet_at_speed(speed: f32) -> usize {
         let settings = Settings {
             asteroid_count: 0,
             players: 0,
-            continuous_collision_detection: true,
             ..default()
         };
         let mut app = build_app(settings);
-        // Sin esto, `app.update()` en un loop apretado no acumula tiempo
-        // real y `FixedUpdate` (donde corre la física) nunca se dispara.
-        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            Duration::from_secs_f64(1.0 / 60.0),
-        ));
-        // `App::run()` llama a esto antes de entrar al loop; como acá
-        // llamamos `update()` a mano (sin `run()`), hay que hacerlo
-        // explícito para que los `finish()`/`cleanup()` de los plugins
-        // corran (p.ej. el registro de diagnósticos internos de avian2d).
         app.finish();
         app.cleanup();
         app.update(); // Startup
 
-        let target = spawn_fighter(
+        spawn_fighter(
             &mut app.world_mut().commands(),
             0,
             Vec2::new(500.0, 0.0),
         );
-        app.world_mut().flush();
-
-        // Bala a 3000 u/s (el bullet_speed de referencia del original
-        // era 1500-2500): a 60 Hz avanza 50 u/tick, más que el radio del
-        // collider de bala (3 u) y comparable al ancho de la nave (~30 u).
-        let bullet_settings = app.world().resource::<Settings>().clone();
         spawn_bullet(
             &mut app.world_mut().commands(),
-            &bullet_settings,
             Vec2::new(0.0, 2.0),
-            Vec2::new(3000.0, 0.0),
+            Vec2::new(speed, 0.0),
             600,
             1,
             StableEntityId(1_000_000),
         );
         app.world_mut().flush();
 
-        let mut collided = false;
-        for _ in 0..30 {
+        let ticks_to_cross = (600.0 / (speed / 60.0)).ceil() as u32 + 2;
+        for _ in 0..ticks_to_cross {
             app.update();
-            if app
-                .world()
-                .get_resource::<Messages<CollisionStart>>()
-                .map(|m| !m.is_empty())
-                .unwrap_or(false)
-            {
-                collided = true;
-                break;
-            }
-            // Si el objetivo ya fue despawneado por el impacto, también cuenta.
-            if app.world().get_entity(target).is_err() {
-                collided = true;
-                break;
-            }
         }
-        assert!(
-            collided,
-            "la bala debería haber colisionado con la nave (CCD activo)"
-        );
+        app.world()
+            .resource::<TickEvents>()
+            .0
+            .iter()
+            .filter(|event| {
+                matches!(event, StarfighterEvent::Hit { player_id: 0, .. })
+            })
+            .count()
+    }
+
+    /// Criterio de aceptación de la Fase 0 y de F3 (ADR-0013): una bala no
+    /// atraviesa una nave sin impactarla, y la impacta exactamente una vez.
+    ///
+    /// Con Avian2D, a ~80 000 u/s (~1300 u por tick, unas 40 veces el ancho
+    /// de la nave) tanto la detección especulativa como `SweptCcd` fallaban
+    /// (hallazgo de la Fase 0, RD-009). Con el barrido de trayectoria de F3
+    /// la velocidad deja de importar: se prueba en el rango real del juego
+    /// (3000 u/s, 50 u/tick), a 10 000 u/s y en ese caso extremo.
+    #[test]
+    fn fast_bullet_does_not_tunnel_through_fighter() {
+        for speed in [3_000.0, 10_000.0, 80_000.0] {
+            assert_eq!(
+                hits_from_bullet_at_speed(speed),
+                1,
+                "una bala a {speed} u/s debe impactar la nave exactamente una vez"
+            );
+        }
     }
 
     /// Criterio de aceptación de la Fase 1: en 1v1 con acciones
@@ -1504,11 +1512,6 @@ mod tests {
                 ..default()
             };
             let mut app = build_app(settings);
-            app.insert_resource(
-                bevy::time::TimeUpdateStrategy::ManualDuration(
-                    Duration::from_secs_f64(1.0 / 60.0),
-                ),
-            );
             app.finish();
             app.cleanup();
             app.update(); // Startup: spawnea las 2 naves
@@ -1786,9 +1789,6 @@ mod tests {
             ..default()
         };
         let mut app = build_app(settings);
-        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            Duration::from_secs_f64(1.0 / 60.0),
-        ));
         app.finish();
         app.cleanup();
         app.update();
@@ -1884,15 +1884,16 @@ mod tests {
         // Ambos impactos son letales por sí solos.
         app.world_mut().get_mut::<Fighter>(fighter).unwrap().health = 10.0;
 
-        // El orden de reporte no importa: se procesan por EntityId.
-        for other in [bullet, asteroid] {
-            app.world_mut().write_message(CollisionStart {
-                collider1: other,
-                collider2: fighter,
-                body1: Some(other),
-                body2: Some(fighter),
-            });
-        }
+        // El orden de reporte no importa: a igual instante de impacto se
+        // procesan por EntityId.
+        app.world_mut().resource_mut::<TickContacts>().0 = [bullet, asteroid]
+            .into_iter()
+            .map(|other| Contact {
+                a: other,
+                b: fighter,
+                time_of_impact: 1.0,
+            })
+            .collect();
         app.world_mut()
             .run_system_once(detect_collisions)
             .expect("run_system_once no debería fallar");
@@ -1953,11 +1954,6 @@ mod tests {
             let mut app = build_app(settings);
             app.finish();
             app.cleanup();
-            app.insert_resource(
-                bevy::time::TimeUpdateStrategy::ManualDuration(
-                    Duration::from_secs_f64(1.0 / 60.0),
-                ),
-            );
             app.update(); // Startup, sin naves automáticas (players: 0)
             let entity =
                 spawn_fighter(&mut app.world_mut().commands(), 0, Vec2::ZERO);
@@ -2109,53 +2105,11 @@ mod tests {
             fn bullet_within_real_speed_range_never_tunnels(
                 bullet_speed in 1500.0f32..=3000.0,
             ) {
-                let settings = Settings {
-                    asteroid_count: 0,
-                    players: 0,
-                    continuous_collision_detection: true,
-                    ..default()
-                };
-                let mut app = build_app(settings);
-                app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-                    Duration::from_secs_f64(1.0 / 60.0),
-                ));
-                app.finish();
-                app.cleanup();
-                app.update(); // Startup
-
-                let target =
-                    spawn_fighter(&mut app.world_mut().commands(), 0, Vec2::new(500.0, 0.0));
-                app.world_mut().flush();
-
-                let bullet_settings = app.world().resource::<Settings>().clone();
-                spawn_bullet(
-                    &mut app.world_mut().commands(),
-                    &bullet_settings,
-                    Vec2::new(0.0, 2.0),
-                    Vec2::new(bullet_speed, 0.0),
-                    600,
+                prop_assert_eq!(
+                    hits_from_bullet_at_speed(bullet_speed),
                     1,
-                    StableEntityId(1_000_000),
-                );
-                app.world_mut().flush();
-
-                let mut collided = false;
-                for _ in 0..30 {
-                    app.update();
-                    let has_event = app
-                        .world()
-                        .get_resource::<Messages<CollisionStart>>()
-                        .map(|m| !m.is_empty())
-                        .unwrap_or(false);
-                    let target_gone = app.world().get_entity(target).is_err();
-                    if has_event || target_gone {
-                        collided = true;
-                        break;
-                    }
-                }
-                prop_assert!(
-                    collided,
-                    "una bala a {bullet_speed} u/s (dentro del rango real del juego) atravesó la nave sin colisionar"
+                    "una bala a {} u/s (rango real del juego) no impactó la nave exactamente una vez",
+                    bullet_speed
                 );
             }
         }

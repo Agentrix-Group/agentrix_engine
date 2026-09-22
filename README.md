@@ -1,7 +1,7 @@
 # Agentrix Engine
 
-Workspace del motor autoritativo headless de Agentrix. Starfighter continúa
-usando Bevy y Avian2D; un juego discreto de conformidad prueba la frontera
+Workspace del motor autoritativo headless de Agentrix. Starfighter usa Bevy
+ECS para sus reglas y `rapier2d` directo para la física (ADR-0013); un juego discreto de conformidad prueba la frontera
 multi-juego sin introducir otro backend físico.
 
 ## Capas compilables
@@ -11,7 +11,7 @@ multi-juego sin introducir otro backend físico.
 - `crates/engine-host`: registry y lifecycle genéricos sobre payloads opacos;
   no importa tipos de Starfighter.
 - `crates/games/conformance-game`: segundo juego mínimo sin física.
-- crate raíz `bevy-starfighter`: reglas y física Avian2D de Starfighter y el
+- crate raíz `bevy-starfighter`: reglas de Starfighter, su backend físico Rapier (`src/physics.rs`) y el
   adaptador temporal del protocolo v1.
 - `bins/conformance-runner`: vectores D1/D2 ejecutables en procesos limpios.
 

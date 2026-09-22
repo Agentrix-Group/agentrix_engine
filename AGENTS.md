@@ -9,7 +9,7 @@ en `docs/index.md`, `docs/decisions/` y `docs/roadmap/current.md`.
 
 ## Responsabilidades
 
-- Rust, Bevy y Avian2D implementan reglas, física, percepciones, eventos,
+- Rust, Bevy ECS y `rapier2d` implementan reglas, física, percepciones, eventos,
   puntajes y estado autoritativo de Starfighter.
 - `starfighter-engine` habla `agentrix-engine/1` por JSON Lines.
 - `stdout` queda reservado al protocolo; logs y diagnósticos van a `stderr`.
@@ -24,8 +24,9 @@ en `docs/index.md`, `docs/decisions/` y `docs/roadmap/current.md`.
 - Starfighter es el único juego actual.
 - La migración de Avian2D a `rapier2d` y a partidas de 2 a 5 jugadores
   todos contra todos está aprobada por ADR-0013 del repositorio principal y
-  avanza por fases F0–F7 con criterios numéricos. Hasta cerrar F3, Avian2D
-  sigue siendo la física en uso. Gym, sim-core y multi-juego siguen el orden
+  avanza por fases F0–F7 con criterios numéricos. Desde F3 la física es
+  `rapier2d` 0.35 con `enhanced-determinism`, usado directamente desde
+  `src/physics.rs` (sin `bevy_rapier2d`). Gym, sim-core y multi-juego siguen el orden
   del roadmap principal.
 - El objetivo es 60 Hz exactos. La entrada actual en milisegundos enteros y la
   configuración de 17 ms son una divergencia pendiente; no se deben presentar

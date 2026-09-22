@@ -4,8 +4,10 @@
 //! v2 cut. This module is the authoritative in-process path exercised by the
 //! phase 1/2 conformance and determinism tests.
 
+use crate::physics::{from_rapier, unpack_stable_id};
 use crate::protocol::WireAction;
 use crate::{
+    AngularVelocity, LinearVelocity, Physics, ThrustForce,
     build_app, build_perception, collect_bullet_snapshots,
     collect_fighter_snapshots, Asteroid, Bullet, CollisionType, EntityId,
     EntityIdAllocator, Fighter, FighterAction, FighterActionMessage,
@@ -17,14 +19,10 @@ use agentrix_sim_core::{
     GameDescriptor, GameKey, GameModule, GamePlayerLimits, GameSchemaDigests,
     SimError, Simulation, SimulationFrame, SimulationSpec,
 };
-use avian2d::prelude::{
-    AngularVelocity, Collisions, ConstantForce, LinearVelocity,
-};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 pub const STARFIGHTER_GAME_ID: &str = "starfighter";
 pub const STARFIGHTER_GAME_VERSION: &str = "0.3.0-core.1";
@@ -77,7 +75,7 @@ impl StarfighterGame {
                 },
                 capabilities: vec![
                     "authoritative_commitment".to_string(),
-                    "avian2d".to_string(),
+                    "rapier2d".to_string(),
                     "deterministic_core_d1".to_string(),
                 ],
             },
@@ -123,22 +121,14 @@ impl GameModule for StarfighterGame {
             asteroid_count: config.asteroid_count,
             max_entities: u64::from(spec.limits.max_entities),
             config,
-            ..Settings::default()
         };
         let mut app = build_app(settings);
         app.finish();
         app.cleanup();
 
-        // Startup/reset must produce State[0], never State[1]. Bevy receives
-        // zero elapsed time for the startup update, then the exact rational
-        // cadence is installed for subsequent simulation updates.
-        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            Duration::ZERO,
-        ));
+        // Startup/reset must produce State[0], never State[1]: the first
+        // update only runs Startup; every later update is exactly one tick.
         app.update();
-        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            Duration::from_secs_f64(spec.tick_rate.seconds_per_tick()),
-        ));
 
         let entities = fighter_entities(&mut app)?;
         if entities.len() != spec.slots.len() {
@@ -163,39 +153,6 @@ struct StarfighterSimulation {
     entities: Vec<Entity>,
     tick: u64,
     initial_emitted: bool,
-}
-
-#[derive(Clone)]
-struct PhysicsContactState {
-    collider1: Option<agentrix_sim_core::StableEntityId>,
-    collider2: Option<agentrix_sim_core::StableEntityId>,
-    body1: Option<agentrix_sim_core::StableEntityId>,
-    body2: Option<agentrix_sim_core::StableEntityId>,
-    flags: u16,
-    manifolds: Vec<PhysicsManifoldState>,
-}
-
-#[derive(Clone)]
-struct PhysicsManifoldState {
-    normal: Vec2,
-    friction: f32,
-    restitution: f32,
-    tangent_speed: f32,
-    points: Vec<PhysicsContactPointState>,
-}
-
-#[derive(Clone)]
-struct PhysicsContactPointState {
-    anchor1: Vec2,
-    anchor2: Vec2,
-    point: Vec2,
-    penetration: f32,
-    normal_impulse: f32,
-    normal_speed: f32,
-    warm_start_normal_impulse: f32,
-    warm_start_tangent_impulse: f32,
-    feature1: u32,
-    feature2: u32,
 }
 
 fn read_snapshots(
@@ -566,7 +523,7 @@ fn encode_authoritative_state(
                 &Transform,
                 &LinearVelocity,
                 &AngularVelocity,
-                &ConstantForce,
+                &ThrustForce,
                 &CollisionType,
             )>| {
                 query
@@ -702,7 +659,7 @@ fn encode_authoritative_state(
         encode_vec2(&mut encoder, asteroid.5)?;
     }
 
-    encode_physics_contacts(app, &mut encoder)?;
+    encode_physics_state(app, &mut encoder)?;
 
     let mut events = app.world().resource::<TickEvents>().0.clone();
     events.sort();
@@ -747,147 +704,84 @@ fn encode_authoritative_state(
     Ok(encoder.into_bytes())
 }
 
-fn encode_physics_contacts(
-    app: &mut App,
+/// Estado interno de Rapier que decide el futuro de la simulación y no
+/// está en los componentes ECS: los handles de arena de cada cuerpo (fijan
+/// el orden en que el solver recorre los cuerpos) y, por cada par en
+/// contacto, sus puntos con los impulsos de warm-start que el paso
+/// siguiente reutiliza. Todo se ordena por `EntityId`, nunca por handle.
+/// Handle de arena de Rapier como `(índice, generación)`.
+type RawHandle = (u32, u32);
+
+fn encode_physics_state(
+    app: &App,
     encoder: &mut CanonicalEncoder,
 ) -> Result<(), SimError> {
-    let mut contacts = app
-        .world_mut()
-        .run_system_once(|collisions: Collisions, ids: Query<&EntityId>| {
-            collisions
-                .graph()
-                .iter_active()
-                .chain(collisions.graph().iter_sleeping())
-                .map(|pair| {
-                    let mut manifolds: Vec<_> = pair
-                        .manifolds
-                        .iter()
-                        .map(|manifold| {
-                            let mut points: Vec<_> = manifold
-                                .points
-                                .iter()
-                                .map(|point| PhysicsContactPointState {
-                                    anchor1: point.anchor1,
-                                    anchor2: point.anchor2,
-                                    point: point.point,
-                                    penetration: point.penetration,
-                                    normal_impulse: point.normal_impulse,
-                                    normal_speed: point.normal_speed,
-                                    warm_start_normal_impulse: point
-                                        .warm_start_normal_impulse,
-                                    warm_start_tangent_impulse: point
-                                        .warm_start_tangent_impulse,
-                                    feature1: point.feature_id1.0,
-                                    feature2: point.feature_id2.0,
-                                })
-                                .collect();
-                            points.sort_by_key(|point| {
-                                (
-                                    point.feature1,
-                                    point.feature2,
-                                    point.point.x.to_bits(),
-                                    point.point.y.to_bits(),
-                                )
-                            });
-                            PhysicsManifoldState {
-                                normal: manifold.normal,
-                                friction: manifold.friction,
-                                restitution: manifold.restitution,
-                                tangent_speed: manifold.tangent_speed,
-                                points,
-                            }
-                        })
-                        .collect();
-                    manifolds.sort_by_key(|manifold| {
-                        let feature_key = manifold
-                            .points
-                            .first()
-                            .map(|point| (point.feature1, point.feature2))
-                            .unwrap_or((u32::MAX, u32::MAX));
-                        (
-                            manifold.normal.x.to_bits(),
-                            manifold.normal.y.to_bits(),
-                            feature_key,
-                        )
-                    });
-                    PhysicsContactState {
-                        collider1: ids.get(pair.collider1).ok().map(|id| id.0),
-                        collider2: ids.get(pair.collider2).ok().map(|id| id.0),
-                        body1: pair.body1.and_then(|entity| {
-                            ids.get(entity).ok().map(|id| id.0)
-                        }),
-                        body2: pair.body2.and_then(|entity| {
-                            ids.get(entity).ok().map(|id| id.0)
-                        }),
-                        flags: pair.flags.bits(),
-                        manifolds,
-                    }
-                })
-                .collect::<Vec<_>>()
+    let world = &app.world().resource::<Physics>().world;
+
+    let mut bodies: Vec<(u64, RawHandle, RawHandle)> = world
+        .colliders
+        .iter()
+        .filter_map(|(collider_handle, collider)| {
+            collider.parent().map(|body_handle| {
+                (
+                    unpack_stable_id(collider.user_data),
+                    body_handle.0.into_raw_parts(),
+                    collider_handle.0.into_raw_parts(),
+                )
+            })
         })
-        .map_err(|error| {
-            SimError::new("physics_contact_query_failed", error.to_string())
-        })?;
-    contacts.sort_by_key(|contact| {
-        (
-            contact.collider1.map(|id| id.0).unwrap_or(u64::MAX),
-            contact.collider2.map(|id| id.0).unwrap_or(u64::MAX),
-        )
-    });
-    encoder.u64(contacts.len() as u64);
-    for contact in contacts {
-        let collider1 = contact.collider1.ok_or_else(|| {
-            SimError::new(
-                "missing_stable_entity_id",
-                "physics contact collider1 has no logical ID",
-            )
-        })?;
-        let collider2 = contact.collider2.ok_or_else(|| {
-            SimError::new(
-                "missing_stable_entity_id",
-                "physics contact collider2 has no logical ID",
-            )
-        })?;
-        encoder.u64(collider1.0);
-        encoder.u64(collider2.0);
-        encode_optional_entity_id(encoder, contact.body1);
-        encode_optional_entity_id(encoder, contact.body2);
-        encoder.u32(u32::from(contact.flags));
-        encoder.u64(contact.manifolds.len() as u64);
-        for manifold in contact.manifolds {
-            encode_vec2(encoder, manifold.normal)?;
-            encoder.f32(manifold.friction)?;
-            encoder.f32(manifold.restitution)?;
-            encoder.f32(manifold.tangent_speed)?;
+        .collect();
+    bodies.sort_by_key(|body| body.0);
+    encoder.u64(bodies.len() as u64);
+    for (id, body, collider) in bodies {
+        encoder.u64(id);
+        encoder.u32(body.0);
+        encoder.u32(body.1);
+        encoder.u32(collider.0);
+        encoder.u32(collider.1);
+    }
+
+    let mut pairs: Vec<_> = world
+        .narrow_phase
+        .contact_pairs()
+        .filter_map(|pair| {
+            let id1 =
+                unpack_stable_id(world.colliders.get(pair.collider1)?.user_data);
+            let id2 =
+                unpack_stable_id(world.colliders.get(pair.collider2)?.user_data);
+            Some((id1, id2, pair))
+        })
+        .collect();
+    pairs.sort_by_key(|(id1, id2, _)| (*id1.min(id2), *id1.max(id2)));
+    encoder.u64(pairs.len() as u64);
+    for (id1, id2, pair) in pairs {
+        encoder.u64(id1);
+        encoder.u64(id2);
+        encoder.bool(pair.has_any_active_contact());
+        encoder.u64(pair.manifolds.len() as u64);
+        for manifold in &pair.manifolds {
+            encode_vec2(encoder, from_rapier(manifold.local_n1))?;
+            encode_vec2(encoder, from_rapier(manifold.local_n2))?;
+            encode_vec2(encoder, from_rapier(manifold.data.normal))?;
+            encoder.u32(manifold.subshape1);
+            encoder.u32(manifold.subshape2);
             encoder.u64(manifold.points.len() as u64);
-            for point in manifold.points {
-                encode_vec2(encoder, point.anchor1)?;
-                encode_vec2(encoder, point.anchor2)?;
-                encode_vec2(encoder, point.point)?;
-                encoder.f32(point.penetration)?;
-                encoder.f32(point.normal_impulse)?;
-                encoder.f32(point.normal_speed)?;
-                encoder.f32(point.warm_start_normal_impulse)?;
-                encoder.f32(point.warm_start_tangent_impulse)?;
-                encoder.u32(point.feature1);
-                encoder.u32(point.feature2);
+            for point in &manifold.points {
+                encode_vec2(encoder, from_rapier(point.local_p1))?;
+                encode_vec2(encoder, from_rapier(point.local_p2))?;
+                encoder.f32(point.dist)?;
+                encoder.u32(point.fid1.0);
+                encoder.u32(point.fid2.0);
+                encoder.f32(point.data.impulse)?;
+                encoder.f32(point.data.tangent_impulse.x)?;
+                encoder.f32(point.data.warmstart_impulse)?;
+                encoder.f32(point.data.warmstart_tangent_impulse.x)?;
+                encode_vec2(encoder, from_rapier(point.data.solver_dp1))?;
+                encode_vec2(encoder, from_rapier(point.data.solver_dp2))?;
             }
         }
     }
     Ok(())
-}
-
-fn encode_optional_entity_id(
-    encoder: &mut CanonicalEncoder,
-    value: Option<agentrix_sim_core::StableEntityId>,
-) {
-    match value {
-        Some(value) => {
-            encoder.bool(true);
-            encoder.u64(value.0);
-        }
-        None => encoder.bool(false),
-    }
 }
 
 fn encode_vec2(
@@ -1078,14 +972,10 @@ mod tests {
             asteroid_count: config.asteroid_count,
             max_entities: u64::from(simulation_spec.limits.max_entities),
             config,
-            ..Settings::default()
         };
         let mut app = build_app(settings);
         app.finish();
         app.cleanup();
-        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            Duration::ZERO,
-        ));
         app.update();
 
         let baseline =

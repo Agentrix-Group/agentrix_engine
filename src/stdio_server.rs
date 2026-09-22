@@ -151,7 +151,7 @@ impl<R: BufRead, W: Write> StdioServer<R, W> {
             "games": descriptors,
             "capabilities": {
                 "authoritative_commitment": true,
-                "avian2d": true,
+                "rapier2d": true,
                 "deterministic_core_d1": true,
             },
             "limits": {

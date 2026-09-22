@@ -2,7 +2,7 @@
 //!
 //! Mide ticks/seg de `build_app` + `app.update()` en loop, **sin**
 //! procesos de bot externos: es el costo del motor (backend físico +
-//! los sistemas de `FixedUpdate` de este crate) aislado del overhead de
+//! los sistemas de reglas de este crate) aislado del overhead de
 //! I/O de procesos que sí mide el protocolo stdio de Fase 4.
 //!
 //! Los escenarios `*_combat` (F0 del corte Rapier/FFA) usan solo la API
@@ -17,7 +17,6 @@ use bevy_starfighter::{
     Settings, Shield, Shoot, Thrust, Turn,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
-use std::time::Duration;
 
 const COMBAT_TICKS: u32 = 600;
 
@@ -30,9 +29,6 @@ fn build_ready_app(players: u32) -> App {
     let mut app = build_app(settings);
     app.finish();
     app.cleanup();
-    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-        Duration::from_secs_f64(1.0 / 60.0),
-    ));
     app.update(); // Startup
 
     for i in 0..players {
@@ -57,9 +53,6 @@ fn build_combat_app(players: u32) -> (App, Vec<Entity>) {
     let mut app = build_app(settings);
     app.finish();
     app.cleanup();
-    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-        Duration::from_secs_f64(1.0 / 60.0),
-    ));
     app.update(); // Startup
     let mut pairs: Vec<(usize, Entity)> = app
         .world_mut()
