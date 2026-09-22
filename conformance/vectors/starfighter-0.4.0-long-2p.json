@@ -1,0 +1,10 @@
+{
+    "last": {
+        "actionBatchDigest": "e9145e5cb4dac47c630102ca9902ddb90b05e8396d589b983265dbe0d6390c2b",
+        "authoritativeStateCommitment": "275445aa513d63690a468b183f15058dc8f9dfecb1583b3cc473ece1ab76cf12",
+        "executionSpecDigest": "8a6f0743aaf056e619ee4f6eae35389d75c3bff0885742d3f9e4d5e1b965badb",
+        "publicSnapshotHash": "2a117c998a2c6ff67c2a21b8200a8ac4b41bf45d311e57bdb168cca92fc87509",
+        "replayChainDigest": "0ab278775d42dfa3a78668b51aea8cbf104d69a571752f0e781a9b06db6ff78f"
+    },
+    "ticks": 3411
+}

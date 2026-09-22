@@ -883,7 +883,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION.to_string(),
             run_id: "run-test".to_string(),
             match_id: "match-test".to_string(),
-            engine_version: "0.3.0-core.1".to_string(),
+            engine_version: "0.4.0".to_string(),
             engine_digest: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             build_identity: "test-build".to_string(),
             target: "x86_64-unknown-linux-gnu".to_string(),

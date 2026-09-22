@@ -12,8 +12,8 @@
     {
       "id": "ccd-fast-bullet",
       "seed": 0,
-      "config": {"asteroid_count": 0, "continuous_collision_detection": true},
-      "expected": "bullet at 3000 units/s collides with fighter",
+      "config": {"asteroid_count": 0},
+      "expected": "bullet at 3000, 10000 and 80000 units/s hits the fighter exactly once (swept, ADR-0013)",
       "evidence": "tests::fast_bullet_does_not_tunnel_through_fighter"
     },
     {
@@ -38,7 +38,15 @@
       "seed": 19,
       "maxTicks": 8,
       "expected": "action N produces state N+1 and terminal at exact limit",
-      "evidence": "starfighter-0.3.0-core.1.json"
+      "evidence": "starfighter-0.4.0.json"
+    },
+    {
+      "id": "ffa-full-match",
+      "seed": 19,
+      "players": 5,
+      "maxTicks": 3600,
+      "expected": "5-player match ends by elimination and reproduces its frozen chain",
+      "evidence": "starfighter-0.4.0-ffa-long-5p.json"
     }
   ]
 }

@@ -143,7 +143,7 @@ impl<R: BufRead, W: Write> StdioServer<R, W> {
             compute_self_digest().unwrap_or_else(|| "0".repeat(64));
         let descriptors = self.host.registry().descriptors();
         let ready_payload = json!({
-            "engineVersion": "0.3.0",
+            "engineVersion": env!("CARGO_PKG_VERSION"),
             "supportedProtocols": [PROTOCOL_VERSION],
             "engineDigest": engine_digest,
             "buildIdentity": "starfighter-build",
