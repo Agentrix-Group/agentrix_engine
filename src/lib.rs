@@ -24,6 +24,7 @@ pub use physics::{
     PhysicsHandle, PhysicsShape, ThrustForce, TickContacts, BULLET_RADIUS,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 
 pub mod game_module;
@@ -443,15 +444,90 @@ pub struct FighterDestroyed {
 
 /// Condición de fin de partida: simétrica, no distingue slots. Se fija
 /// una sola vez, la primera vez que queda una nave viva o cero (empate
-/// por destrucción mutua). Un límite externo de ticks sin que esto se
-/// fije también cuenta como empate, pero eso lo decide quien corre la
-/// partida (el motor no fuerza un límite de ticks acá).
+/// por destrucción mutua). El límite de ticks lo aplica quien corre la
+/// partida; la clasificación completa sale de `placements`.
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct MatchResult {
     pub finished: bool,
     /// `player_id` del único sobreviviente. `None` si terminó por
     /// destrucción mutua (cero sobrevivientes) o si no terminó todavía.
     pub winner: Option<usize>,
+}
+
+/// Registro competitivo de la partida, parte del estado autoritativo.
+#[derive(Resource, Default, Clone, Debug, PartialEq)]
+pub struct Scoreboard {
+    /// Tick del estado en que cada slot fue eliminado; ausente si vive.
+    pub eliminated_at: BTreeMap<usize, u64>,
+    /// Bajas atribuidas a cada slot (solo impactos de sus balas).
+    pub kills: BTreeMap<usize, u32>,
+}
+
+/// Puesto final de un slot en la clasificación.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    pub player_id: usize,
+    /// Clasificación de competencia: 1 + cantidad de slots estrictamente
+    /// mejores. Los empatados comparten puesto (1, 2, 2, 4).
+    pub rank: u32,
+    pub kills: u32,
+}
+
+/// Clasificación todos contra todos (ADR-0013):
+/// - los sobrevivientes van antes que los eliminados, ordenados por salud
+///   restante (al terminar por límite de ticks puede haber varios);
+/// - los eliminados se ordenan por tick de eliminación, el más tardío
+///   primero; los eliminados en el mismo tick empatan.
+///
+/// `alive` trae `(player_id, health)` de cada nave viva. El resultado sale
+/// ordenado por puesto y, a igual puesto, por `player_id`.
+pub fn placements(
+    players: usize,
+    alive: &[(usize, f32)],
+    scoreboard: &Scoreboard,
+) -> Vec<Placement> {
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Standing {
+        // Mayor es mejor en ambos casos.
+        Eliminated { tick: u64 },
+        Alive { health_bits: u32 },
+    }
+    let health_key = |health: f32| {
+        // Salud no negativa: el orden de los bits IEEE coincide con el
+        // orden numérico, y dos naves empatan solo si su salud es idéntica.
+        health.max(0.0).to_bits()
+    };
+    let standings: Vec<(usize, Standing)> = (0..players)
+        .map(|player_id| {
+            let standing = match alive.iter().find(|(id, _)| *id == player_id)
+            {
+                Some((_, health)) => Standing::Alive {
+                    health_bits: health_key(*health),
+                },
+                None => Standing::Eliminated {
+                    tick: scoreboard
+                        .eliminated_at
+                        .get(&player_id)
+                        .copied()
+                        .unwrap_or(0),
+                },
+            };
+            (player_id, standing)
+        })
+        .collect();
+    let mut result: Vec<Placement> = standings
+        .iter()
+        .map(|&(player_id, standing)| Placement {
+            player_id,
+            rank: 1 + standings
+                .iter()
+                .filter(|(_, other)| *other > standing)
+                .count() as u32,
+            kills: scoreboard.kills.get(&player_id).copied().unwrap_or(0),
+        })
+        .collect();
+    result.sort_by_key(|placement| (placement.rank, placement.player_id));
+    result
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -469,6 +545,8 @@ pub enum StarfighterEvent {
     Destroyed {
         player_id: usize,
         source: String,
+        /// Slot que hizo la baja; `None` si fue un asteroide.
+        killer: Option<usize>,
     },
     MatchEnded {
         winner: Option<usize>,
@@ -515,12 +593,14 @@ impl Ord for StarfighterEvent {
                 Self::Destroyed {
                     player_id: p1,
                     source: s1,
+                    killer: k1,
                 },
                 Self::Destroyed {
                     player_id: p2,
                     source: s2,
+                    killer: k2,
                 },
-            ) => (p1, s1).cmp(&(p2, s2)),
+            ) => (p1, s1, k1).cmp(&(p2, s2, k2)),
             (Self::Destroyed { .. }, _) => std::cmp::Ordering::Less,
             (_, Self::Destroyed { .. }) => std::cmp::Ordering::Greater,
 
@@ -557,10 +637,22 @@ impl DerefMut for RngState {
 #[derive(Resource, Default)]
 pub struct SimulationClock {
     armed: bool,
+    tick: u64,
+}
+
+impl SimulationClock {
+    /// Tick del estado que se está produciendo (0 en Startup).
+    pub fn tick(&self) -> u64 {
+        self.tick
+    }
 }
 
 fn arm_simulation_clock(mut clock: ResMut<SimulationClock>) {
     clock.armed = true;
+}
+
+fn advance_simulation_clock(mut clock: ResMut<SimulationClock>) {
+    clock.tick += 1;
 }
 
 fn simulation_armed(clock: Res<SimulationClock>) -> bool {
@@ -583,6 +675,7 @@ pub fn build_app(settings: Settings) -> App {
         .init_resource::<MatchResult>()
         .init_resource::<TickEvents>()
         .init_resource::<SimulationClock>()
+        .init_resource::<Scoreboard>()
         .add_message::<FighterActionMessage>()
         .add_message::<FighterDestroyed>()
         .insert_resource(settings)
@@ -591,6 +684,7 @@ pub fn build_app(settings: Settings) -> App {
         .add_systems(
             Update,
             (
+                advance_simulation_clock,
                 check_boundary_collision,
                 spawn_asteroids,
                 fighter_actions,
@@ -608,20 +702,59 @@ pub fn build_app(settings: Settings) -> App {
     app
 }
 
+/// Puntos de spawn: `players` puntos equiespaciados en ángulo sobre una
+/// elipse al 60 % de la arena, siempre dentro de ella. Con dos jugadores son
+/// (±0.6·half_width, 0), igual que el spawn circular anterior.
+pub fn spawn_points(settings: &Settings) -> Vec<Vec2> {
+    let players = settings.players.max(1);
+    (0..players)
+        .map(|i| {
+            let angle = i as f32 / players as f32 * std::f32::consts::TAU;
+            Vec2::new(
+                libm::cosf(angle) * settings.arena_half_width() * 0.6,
+                libm::sinf(angle) * settings.arena_half_height() * 0.6,
+            )
+        })
+        .collect()
+}
+
+/// Dirección desde `position` hacia el centro de la arena.
+fn facing_center(position: Vec2) -> Vec2 {
+    let toward_center = -position;
+    if toward_center.length_squared() > 0.0 {
+        toward_center.normalize()
+    } else {
+        Vec2::Y
+    }
+}
+
+/// Reparte los puntos de spawn con una permutación derivada de la semilla
+/// (Fisher-Yates sobre `RngState`): con una arena rectangular los puntos no
+/// son equivalentes, así que ningún slot conserva el mismo lugar en todas
+/// las partidas. Cada nave nace mirando al centro.
 fn setup(
     settings: Res<Settings>,
     mut cmd: Commands,
     mut rng: ResMut<RngState>,
 ) {
-    for i in 0..settings.players as usize {
-        let angle = i as f32 / settings.players.max(1) as f32
-            * std::f32::consts::PI
-            * 2.0;
-        let position = Vec2::new(libm::cosf(angle), libm::sinf(angle))
-            * (settings.arena_half_width() * 0.6);
-        spawn_fighter_with_settings(&mut cmd, i, position, &settings);
+    let points = spawn_points(&settings);
+    let mut order: Vec<usize> = (0..settings.players as usize).collect();
+    for i in (1..order.len()).rev() {
+        let j = rng
+            .range_u32(0, i as u32 + 1)
+            .expect("non-empty spawn permutation range") as usize;
+        order.swap(i, j);
     }
-    let _ = &mut rng; // reservado para spawns futuros no deterministas por posición fija
+    for (player_id, point) in order.into_iter().enumerate() {
+        let position = points[point];
+        spawn_fighter_facing(
+            &mut cmd,
+            player_id,
+            position,
+            facing_center(position),
+            &settings,
+        );
+    }
 }
 
 pub fn spawn_fighter(
@@ -638,6 +771,19 @@ pub fn spawn_fighter_with_settings(
     position: Vec2,
     settings: &Settings,
 ) -> Entity {
+    spawn_fighter_facing(cmd, player_id, position, Vec2::Y, settings)
+}
+
+/// Spawnea una nave con la nariz apuntando a `facing` (vector unitario).
+pub fn spawn_fighter_facing(
+    cmd: &mut Commands,
+    player_id: usize,
+    position: Vec2,
+    facing: Vec2,
+    settings: &Settings,
+) -> Entity {
+    // facing = (-sin θ, cos θ)  =>  cos θ = facing.y, sin θ = -facing.x
+    let rotation = physics::cos_sin_to_quat(facing.y, -facing.x);
     cmd.spawn((
         Fighter {
             player_id,
@@ -656,7 +802,8 @@ pub fn spawn_fighter_with_settings(
             ]),
             lock_rotation: false,
         },
-        Transform::from_translation(position.extend(0.0)),
+        Transform::from_translation(position.extend(0.0))
+            .with_rotation(rotation),
         LinearVelocity::ZERO,
         AngularVelocity::ZERO,
         ThrustForce::default(),
@@ -949,8 +1096,16 @@ fn detect_collisions(
     mut asteroids: Query<&mut Asteroid>,
     mut destroyed: MessageWriter<FighterDestroyed>,
     mut events: ResMut<TickEvents>,
+    mut scoreboard: ResMut<Scoreboard>,
+    clock: Res<SimulationClock>,
     settings: Res<Settings>,
 ) {
+    let mut ledger = HitLedger {
+        tick: clock.tick(),
+        events: &mut events,
+        scoreboard: &mut scoreboard,
+        destroyed: &mut destroyed,
+    };
     let mut contacts: Vec<&Contact> = contacts.0.iter().collect();
     contacts.sort_by(|x, y| {
         x.time_of_impact.total_cmp(&y.time_of_impact).then_with(|| {
@@ -989,11 +1144,13 @@ fn detect_collisions(
                     &mut cmd,
                     &mut fighters,
                     fighter_entity,
-                    settings.asteroid_damage(),
-                    settings.shield_damage_reduction(),
-                    "an asteroid",
-                    &mut destroyed,
-                    &mut events,
+                    HitSource {
+                        damage: settings.asteroid_damage(),
+                        shield_reduction: settings.shield_damage_reduction(),
+                        description: "an asteroid",
+                        killer: None,
+                    },
+                    &mut ledger,
                 ) {
                     consumed.push(fighter_entity);
                 }
@@ -1056,11 +1213,14 @@ fn detect_collisions(
                         &mut cmd,
                         &mut fighters,
                         fighter_entity,
-                        settings.bullet_damage(),
-                        settings.shield_damage_reduction(),
-                        &source,
-                        &mut destroyed,
-                        &mut events,
+                        HitSource {
+                            damage: settings.bullet_damage(),
+                            shield_reduction: settings
+                                .shield_damage_reduction(),
+                            description: &source,
+                            killer: shooter,
+                        },
+                        &mut ledger,
                     ) {
                         consumed.push(fighter_entity);
                     }
@@ -1081,21 +1241,39 @@ fn detect_collisions(
     }
 }
 
-/// Resta `damage` a la nave (reducido si tiene el escudo activo) y la
-/// destruye si su HP llega a cero. Mismo camino para cualquier
-/// `player_id` — no hay ninguna rama especial por slot acá.
-/// Devuelve `true` si la nave quedó destruida.
-#[allow(clippy::too_many_arguments)]
+/// Dónde queda registrado lo que produce un impacto durante el tick.
+struct HitLedger<'a, 'w> {
+    tick: u64,
+    events: &'a mut TickEvents,
+    scoreboard: &'a mut Scoreboard,
+    destroyed: &'a mut MessageWriter<'w, FighterDestroyed>,
+}
+
+/// Qué golpea a la nave: daño base, descripción y slot autor (si lo hay).
+struct HitSource<'a> {
+    damage: f32,
+    shield_reduction: f32,
+    description: &'a str,
+    killer: Option<usize>,
+}
+
+/// Resta el daño a la nave (reducido si tiene el escudo activo) y la
+/// destruye si su HP llega a cero, registrando tick de eliminación y baja
+/// del autor. Mismo camino para cualquier `player_id` — no hay ninguna
+/// rama especial por slot acá. Devuelve `true` si la nave quedó destruida.
 fn take_hit(
     cmd: &mut Commands,
     fighters: &mut Query<&mut Fighter>,
     entity: Entity,
-    damage: f32,
-    shield_reduction: f32,
-    source: &str,
-    destroyed: &mut MessageWriter<FighterDestroyed>,
-    events: &mut TickEvents,
+    hit: HitSource,
+    ledger: &mut HitLedger,
 ) -> bool {
+    let HitSource {
+        damage,
+        shield_reduction,
+        description: source,
+        killer,
+    } = hit;
     let Ok(mut fighter) = fighters.get_mut(entity) else {
         return false;
     };
@@ -1105,7 +1283,7 @@ fn take_hit(
         damage
     };
     fighter.health -= effective_damage;
-    events.0.push(StarfighterEvent::Hit {
+    ledger.events.0.push(StarfighterEvent::Hit {
         player_id: fighter.player_id,
         source: source.to_string(),
         damage: effective_damage,
@@ -1113,11 +1291,19 @@ fn take_hit(
     });
     if fighter.health <= 0.0 {
         fighter.health = 0.0;
-        events.0.push(StarfighterEvent::Destroyed {
+        ledger.events.0.push(StarfighterEvent::Destroyed {
             player_id: fighter.player_id,
             source: source.to_string(),
+            killer,
         });
-        destroyed.write(FighterDestroyed {
+        ledger
+            .scoreboard
+            .eliminated_at
+            .insert(fighter.player_id, ledger.tick);
+        if let Some(killer) = killer {
+            *ledger.scoreboard.kills.entry(killer).or_insert(0) += 1;
+        }
+        ledger.destroyed.write(FighterDestroyed {
             entity,
             player_id: fighter.player_id,
         });
@@ -1919,6 +2105,286 @@ mod tests {
         );
     }
 
+    /// Naves vivas de una app ya iniciada, ordenadas por `player_id`.
+    fn fighters_by_slot(app: &mut App) -> Vec<(usize, Entity)> {
+        let mut pairs: Vec<(usize, Entity)> = app
+            .world_mut()
+            .query::<(Entity, &Fighter)>()
+            .iter(app.world())
+            .map(|(entity, fighter)| (fighter.player_id, entity))
+            .collect();
+        pairs.sort_by_key(|(id, _)| *id);
+        pairs
+    }
+
+    /// Criterio de F4 (ADR-0013): con 2 a 5 jugadores ninguna nave nace
+    /// fuera de la arena, todas miran al centro y no hay dos en el mismo
+    /// punto. El spawn circular anterior dejaba naves en y ≈ ±570 con
+    /// `half_height` = 500 a partir de 3 jugadores.
+    #[test]
+    fn spawn_is_inside_arena_facing_center_for_2_to_5_players() {
+        for players in 2..=5u32 {
+            for seed in 0..8 {
+                let settings = Settings {
+                    seed,
+                    players,
+                    asteroid_count: 0,
+                    ..default()
+                };
+                let (half_w, half_h) =
+                    (settings.arena_half_width(), settings.arena_half_height());
+                let mut app = build_app(settings);
+                app.finish();
+                app.cleanup();
+                app.update();
+
+                let fighters = fighters_by_slot(&mut app);
+                assert_eq!(fighters.len(), players as usize);
+                let mut positions = Vec::new();
+                for (player_id, entity) in fighters {
+                    let transform =
+                        app.world().get::<Transform>(entity).unwrap();
+                    let position = transform.translation.truncate();
+                    assert!(
+                        position.x.abs() <= half_w && position.y.abs() <= half_h,
+                        "{players} jugadores, semilla {seed}: P{player_id} nace fuera de la arena en {position:?}"
+                    );
+                    let to_center = (-position).normalize();
+                    let facing = facing_direction(transform);
+                    assert!(
+                        facing.dot(to_center) > 0.999,
+                        "{players} jugadores, semilla {seed}: P{player_id} mira {facing:?}, el centro está en {to_center:?}"
+                    );
+                    assert!(
+                        positions
+                            .iter()
+                            .all(|other: &Vec2| other.distance(position) > 100.0),
+                        "{players} jugadores, semilla {seed}: dos naves nacen juntas"
+                    );
+                    positions.push(position);
+                }
+            }
+        }
+    }
+
+    /// La asignación de puntos de spawn depende de la semilla: en 5
+    /// jugadores, el slot 0 no nace siempre en el mismo lugar.
+    #[test]
+    fn spawn_assignment_is_permuted_by_seed() {
+        let mut first_slot_positions = Vec::new();
+        for seed in 0..16 {
+            let mut app = build_app(Settings {
+                seed,
+                players: 5,
+                asteroid_count: 0,
+                ..default()
+            });
+            app.finish();
+            app.cleanup();
+            app.update();
+            let (_, entity) = fighters_by_slot(&mut app)[0];
+            let position =
+                app.world().get::<Transform>(entity).unwrap().translation;
+            if !first_slot_positions.contains(&position) {
+                first_slot_positions.push(position);
+            }
+        }
+        assert!(
+            first_slot_positions.len() >= 3,
+            "el slot 0 ocupó solo {} puntos distintos en 16 semillas",
+            first_slot_positions.len()
+        );
+    }
+
+    #[test]
+    fn placements_follow_elimination_order_and_health() {
+        let scoreboard = Scoreboard {
+            eliminated_at: BTreeMap::from([(0, 50), (2, 80), (3, 80)]),
+            kills: BTreeMap::from([(1, 2), (4, 1)]),
+        };
+        // Termina por límite de ticks con P1 y P4 vivos.
+        let result = placements(5, &[(1, 40.0), (4, 75.0)], &scoreboard);
+        let ranks: Vec<(usize, u32, u32)> = result
+            .iter()
+            .map(|p| (p.player_id, p.rank, p.kills))
+            .collect();
+        assert_eq!(
+            ranks,
+            vec![(4, 1, 1), (1, 2, 2), (2, 3, 0), (3, 3, 0), (0, 5, 0)],
+            "vivos por salud, luego eliminados del más tardío al más temprano, empatando el mismo tick"
+        );
+
+        // Destrucción mutua en el último tick: los dos últimos empatan
+        // primeros y no hay ganador único.
+        let scoreboard = Scoreboard {
+            eliminated_at: BTreeMap::from([(0, 10), (1, 90), (2, 90)]),
+            kills: BTreeMap::new(),
+        };
+        let result = placements(3, &[], &scoreboard);
+        assert_eq!(result[0].rank, 1);
+        assert_eq!(result[1].rank, 1);
+        assert_eq!(result[2].rank, 3);
+
+        // Sobrevivientes con salud idéntica empatan.
+        let result =
+            placements(2, &[(0, 100.0), (1, 100.0)], &Scoreboard::default());
+        assert!(result.iter().all(|p| p.rank == 1));
+    }
+
+    /// Una baja por bala queda atribuida al slot que disparó, con el tick
+    /// de eliminación del estado en curso; un asteroide no suma bajas.
+    #[test]
+    fn bullet_kill_is_attributed_to_shooter() {
+        let mut app = build_app(Settings {
+            players: 0,
+            asteroid_count: 0,
+            ..default()
+        });
+        app.finish();
+        app.cleanup();
+        app.update();
+        let fighter =
+            spawn_fighter(&mut app.world_mut().commands(), 0, Vec2::ZERO);
+        let bullet = app
+            .world_mut()
+            .spawn((
+                Bullet {
+                    remaining_lifetime: 10,
+                    player_id: 3,
+                },
+                EntityId(StableEntityId(1_000_000)),
+                CollisionType::Bullet,
+            ))
+            .id();
+        app.world_mut().flush();
+        app.world_mut().get_mut::<Fighter>(fighter).unwrap().health = 10.0;
+        app.world_mut().resource_mut::<TickContacts>().0 = vec![Contact {
+            a: bullet,
+            b: fighter,
+            time_of_impact: 0.5,
+        }];
+        app.world_mut()
+            .run_system_once(detect_collisions)
+            .expect("run_system_once no debería fallar");
+
+        let events = &app.world().resource::<TickEvents>().0;
+        assert!(
+            events.contains(&StarfighterEvent::Destroyed {
+                player_id: 0,
+                source: "P3's bullet".to_string(),
+                killer: Some(3),
+            }),
+            "eventos: {events:?}"
+        );
+        let scoreboard = app.world().resource::<Scoreboard>();
+        assert_eq!(scoreboard.kills.get(&3), Some(&1));
+        assert_eq!(scoreboard.eliminated_at.get(&0), Some(&0));
+    }
+
+    /// Criterio de F4 (ADR-0013): en partidas de 5 naves con acciones
+    /// aleatorias, la tasa de victoria de cada slot cae dentro de 3σ de 1/5
+    /// sobre las partidas con ganador único (último sobreviviente o, al
+    /// agotar los ticks, única nave con más salud). Sin la permutación de
+    /// spawn por semilla, un slot con un lugar sistemáticamente mejor se
+    /// vería acá.
+    ///
+    /// **Marcado `#[ignore]`** por costo, igual que el test 1v1. Correrlo con
+    /// `cargo test --release --lib symmetric_ffa -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "estadístico, correr explícito en release"]
+    fn symmetric_ffa_5_players_random_actions_no_slot_bias() {
+        const PLAYERS: usize = 5;
+        const N_MATCHES: u64 = 1000;
+        const MAX_TICKS: u32 = 3600;
+        const MIN_DECIDED: u32 = 300;
+
+        let mut wins = [0u32; PLAYERS];
+        let mut undecided = 0u32;
+        for seed in 0..N_MATCHES {
+            let mut app = build_app(Settings {
+                seed,
+                players: PLAYERS as u32,
+                ..default()
+            });
+            app.finish();
+            app.cleanup();
+            app.update();
+            let entities: Vec<Entity> = fighters_by_slot(&mut app)
+                .into_iter()
+                .map(|(_, entity)| entity)
+                .collect();
+            let mut rng = DeterministicRng::from_seed(seed ^ 0x5eed);
+            for _ in 0..MAX_TICKS {
+                for entity in &entities {
+                    let action = FighterAction {
+                        thrust: [Thrust::On, Thrust::Off, Thrust::Stop]
+                            [rng.range_u32(0, 3).unwrap() as usize],
+                        turn: [Turn::Left, Turn::Right, Turn::None]
+                            [rng.range_u32(0, 3).unwrap() as usize],
+                        shoot: if rng.probability(0.85).unwrap() {
+                            Shoot::On
+                        } else {
+                            Shoot::Off
+                        },
+                        shield: if rng.probability(0.2).unwrap() {
+                            Shield::On
+                        } else {
+                            Shield::Off
+                        },
+                    };
+                    app.world_mut().write_message(FighterActionMessage {
+                        action,
+                        entity: *entity,
+                    });
+                }
+                app.update();
+                if app.world().resource::<MatchResult>().finished {
+                    break;
+                }
+            }
+            let alive: Vec<(usize, f32)> = app
+                .world_mut()
+                .query::<&Fighter>()
+                .iter(app.world())
+                .map(|fighter| (fighter.player_id, fighter.health))
+                .collect();
+            let result = placements(
+                PLAYERS,
+                &alive,
+                app.world().resource::<Scoreboard>(),
+            );
+            match result.iter().filter(|p| p.rank == 1).collect::<Vec<_>>()[..]
+            {
+                [winner] => wins[winner.player_id] += 1,
+                _ => undecided += 1,
+            }
+        }
+
+        let decided: u32 = wins.iter().sum();
+        println!(
+            "symmetric_ffa: wins={wins:?} undecided={undecided} decided={decided}/{N_MATCHES}"
+        );
+        assert!(
+            decided >= MIN_DECIDED,
+            "muy pocas partidas con ganador único ({decided}/{N_MATCHES})"
+        );
+        let expected = 1.0 / PLAYERS as f64;
+        let margin = 3.0 * (expected * (1.0 - expected) / decided as f64).sqrt();
+        for (slot, slot_wins) in wins.iter().enumerate() {
+            let rate = *slot_wins as f64 / decided as f64;
+            println!(
+                "symmetric_ffa: P{slot} tasa={rate:.4} esperado={expected:.2}±{margin:.4}"
+            );
+            assert!(
+                (rate - expected).abs() <= margin,
+                "P{slot} gana {:.1}% de las partidas decididas, fuera de {:.1}% ± {:.1} puntos",
+                rate * 100.0,
+                expected * 100.0,
+                margin * 100.0
+            );
+        }
+    }
+
     /// Fase 6: invariantes de física y reglas sobre entradas generadas al
     /// azar dentro de rangos que el propio motor puede producir -- no
     /// valores absurdos fuera de lo que un agente real podría causar.
@@ -2007,8 +2473,26 @@ mod tests {
                         move |mut cmd: Commands,
                               mut fighters: Query<&mut Fighter>,
                               mut destroyed: MessageWriter<FighterDestroyed>,
-                              mut events: ResMut<TickEvents>| {
-                            take_hit(&mut cmd, &mut fighters, entity, damage, 0.7, "proptest", &mut destroyed, &mut events);
+                              mut events: ResMut<TickEvents>,
+                              mut scoreboard: ResMut<Scoreboard>| {
+                            let mut ledger = HitLedger {
+                                tick: 1,
+                                events: &mut events,
+                                scoreboard: &mut scoreboard,
+                                destroyed: &mut destroyed,
+                            };
+                            take_hit(
+                                &mut cmd,
+                                &mut fighters,
+                                entity,
+                                HitSource {
+                                    damage,
+                                    shield_reduction: 0.7,
+                                    description: "proptest",
+                                    killer: None,
+                                },
+                                &mut ledger,
+                            );
                         },
                     )
                     .expect("run_system_once no debería fallar");

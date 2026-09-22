@@ -13,6 +13,10 @@ fn every_versioned_schema_is_valid_json() {
         ("starfighter/config", include_bytes!("../../../schemas/games/starfighter/0.3.0-core.1/config.schema.json")),
         ("starfighter/observation", include_bytes!("../../../schemas/games/starfighter/0.3.0-core.1/observation.schema.json")),
         ("starfighter/public", include_bytes!("../../../schemas/games/starfighter/0.3.0-core.1/public.schema.json")),
+        ("starfighter-0.4/action", include_bytes!("../../../schemas/games/starfighter/0.4.0/action.schema.json")),
+        ("starfighter-0.4/config", include_bytes!("../../../schemas/games/starfighter/0.4.0/config.schema.json")),
+        ("starfighter-0.4/observation", include_bytes!("../../../schemas/games/starfighter/0.4.0/observation.schema.json")),
+        ("starfighter-0.4/public", include_bytes!("../../../schemas/games/starfighter/0.4.0/public.schema.json")),
     ];
     for (name, bytes) in schemas {
         let value: serde_json::Value = serde_json::from_slice(bytes)

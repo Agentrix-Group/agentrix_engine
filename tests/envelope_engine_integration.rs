@@ -115,7 +115,7 @@ fn sample_spec(match_id: &str, p0: &str, p1: &str, max_ticks: u64) -> Value {
         "target": "x86_64-unknown-linux-gnu",
         "game": {
             "gameId": "starfighter",
-            "gameVersion": "0.3.0-core.1",
+            "gameVersion": bevy_starfighter::game_module::STARFIGHTER_GAME_VERSION,
             "gameDigest": bevy_starfighter::game_module::derive_starfighter_game_digest(),
         },
         "schemaDigests": {
@@ -438,7 +438,7 @@ fn test_custom_starfighter_config_and_exact_60hz() {
         "target": "x86_64-unknown-linux-gnu",
         "game": {
             "gameId": "starfighter",
-            "gameVersion": "0.3.0-core.1",
+            "gameVersion": bevy_starfighter::game_module::STARFIGHTER_GAME_VERSION,
             "gameDigest": bevy_starfighter::game_module::derive_starfighter_game_digest(),
         },
         "schemaDigests": {

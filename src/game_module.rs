@@ -4,15 +4,15 @@
 //! v2 cut. This module is the authoritative in-process path exercised by the
 //! phase 1/2 conformance and determinism tests.
 
-use crate::physics::{from_rapier, unpack_stable_id};
+use crate::physics::{from_rapier, quat_to_cos_sin, unpack_stable_id};
 use crate::protocol::WireAction;
 use crate::{
     AngularVelocity, LinearVelocity, Physics, ThrustForce,
     build_app, build_perception, collect_bullet_snapshots,
     collect_fighter_snapshots, Asteroid, Bullet, CollisionType, EntityId,
     EntityIdAllocator, Fighter, FighterAction, FighterActionMessage,
-    MatchResult, RngState, Settings, Shield, Shoot, StarfighterConfig,
-    StarfighterEvent, Thrust, TickEvents, Turn,
+    MatchResult, RngState, Scoreboard, Settings, Shield, Shoot,
+    StarfighterConfig, StarfighterEvent, Thrust, TickEvents, Turn,
 };
 use agentrix_sim_core::{
     canonical_json_digest, ActionBatch, ActionStatus, CanonicalEncoder,
@@ -25,13 +25,13 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 pub const STARFIGHTER_GAME_ID: &str = "starfighter";
-pub const STARFIGHTER_GAME_VERSION: &str = "0.3.0-core.1";
+pub const STARFIGHTER_GAME_VERSION: &str = "0.4.0";
 pub const ACTION_SCHEMA_DIGEST: &str =
-    "6a01f31f81fcc4ee40aed89bee030a5250d841edbf5a9c93548d7f8ae78356d4";
+    "c97852810619ca799214c65f54acbdd1cd6e4ea98c55ea21dc7f21c73e004848";
 pub const OBSERVATION_SCHEMA_DIGEST: &str =
-    "09264082275be4df7a7da2d51f447f8dbb1c08929a0a4120a9f9202a950426ea";
+    "fecb52b52fcb6d3af1bf69d2e83f4dcb300ac9dbbbb0f6fbaeeb3c310bee126d";
 pub const PUBLIC_SCHEMA_DIGEST: &str =
-    "6a422a9da18f35530ea63ac49959e77ac08a08c30e2a728b51d6c6144ead293c";
+    "a40acf5714e7f4571b82b8c67829987f98e80f23aa4c802190d44770d79581d9";
 
 pub fn derive_starfighter_game_digest() -> String {
     let manifest = json!({
@@ -66,7 +66,7 @@ impl StarfighterGame {
                 key: starfighter_game_key(),
                 players: GamePlayerLimits {
                     minimum: 2,
-                    maximum: 2,
+                    maximum: 5,
                 },
                 schemas: GameSchemaDigests {
                     action: ACTION_SCHEMA_DIGEST.to_string(),
@@ -224,14 +224,16 @@ impl StarfighterSimulation {
         let match_result = *self.app.world().resource::<MatchResult>();
         let terminal =
             match_result.finished || self.tick >= self.spec.limits.max_ticks;
-        let result = terminal.then(|| {
-            game_result(
+        let result = if terminal {
+            Some(game_result(
+                &mut self.app,
                 match_result,
                 self.tick,
                 &slot_ids,
-                self.spec.limits.max_ticks,
-            )
-        });
+            )?)
+        } else {
+            None
+        };
         let events_value: Vec<Value> = events
             .into_iter()
             .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
@@ -364,7 +366,11 @@ fn public_snapshot(
                             fighter.player_id,
                             transform.translation,
                             velocity.0,
-                            transform.rotation.to_euler(EulerRot::XYZ).2,
+                            {
+                                let (cos, sin) =
+                                    quat_to_cos_sin(transform.rotation);
+                                libm::atan2f(sin, cos)
+                            },
                             angular.0,
                             fighter.health,
                             fighter.shield_active,
@@ -438,43 +444,54 @@ fn public_snapshot(
     }))
 }
 
+/// Resultado final todos contra todos. `rank` sigue `crate::placements`
+/// (orden de eliminación, sobrevivientes por salud) y `score` son las bajas
+/// del slot. Hay ganador solo si un único slot ocupa el primer puesto.
 fn game_result(
+    app: &mut App,
     result: MatchResult,
     tick: u64,
     slots: &[String],
-    _max_ticks: u64,
-) -> Value {
-    let winner = result.winner.and_then(|player_id| slots.get(player_id));
-    let mut rankings = Vec::new();
-    for (i, slot) in slots.iter().enumerate() {
-        let score = if Some(i) == result.winner { 1 } else { 0 };
-        let rank = if Some(i) == result.winner {
-            1
-        } else if result.winner.is_some() {
-            2
-        } else {
-            1
-        };
-        rankings.push(json!({
-            "slot": slot,
-            "score": score,
-            "rank": rank,
-        }));
-    }
-    rankings.sort_by(|a: &Value, b: &Value| {
-        let rank_a = a["rank"].as_u64().unwrap_or(0);
-        let rank_b = b["rank"].as_u64().unwrap_or(0);
-        let slot_a = a["slot"].as_str().unwrap_or("");
-        let slot_b = b["slot"].as_str().unwrap_or("");
-        rank_a.cmp(&rank_b).then_with(|| slot_a.cmp(slot_b))
-    });
-    json!({
+) -> Result<Value, SimError> {
+    let alive = app
+        .world_mut()
+        .run_system_once(|fighters: Query<&Fighter>| {
+            fighters
+                .iter()
+                .map(|fighter| (fighter.player_id, fighter.health))
+                .collect::<Vec<_>>()
+        })
+        .map_err(|error| {
+            SimError::new("result_fighter_query_failed", error.to_string())
+        })?;
+    let placements = crate::placements(
+        slots.len(),
+        &alive,
+        app.world().resource::<Scoreboard>(),
+    );
+    let leaders: Vec<_> =
+        placements.iter().filter(|placement| placement.rank == 1).collect();
+    let winner = match leaders.as_slice() {
+        [only] => slots.get(only.player_id),
+        _ => None,
+    };
+    let rankings: Vec<Value> = placements
+        .iter()
+        .map(|placement| {
+            json!({
+                "slot": slots.get(placement.player_id),
+                "score": placement.kills,
+                "rank": placement.rank,
+            })
+        })
+        .collect();
+    Ok(json!({
         "schemaVersion": "agentrix-game-result/1",
         "terminalReason": if result.finished { "eliminated" } else { "tick_limit" },
         "winner": winner,
         "rankings": rankings,
         "tick": tick,
-    })
+    }))
 }
 
 fn encode_authoritative_state(
@@ -504,6 +521,17 @@ fn encode_authoritative_state(
         .resource::<RngState>()
         .0
         .encode_state(&mut encoder);
+    let scoreboard = app.world().resource::<Scoreboard>();
+    encoder.u64(scoreboard.eliminated_at.len() as u64);
+    for (player_id, tick) in &scoreboard.eliminated_at {
+        encoder.u64(*player_id as u64);
+        encoder.u64(*tick);
+    }
+    encoder.u64(scoreboard.kills.len() as u64);
+    for (player_id, kills) in &scoreboard.kills {
+        encoder.u64(*player_id as u64);
+        encoder.u32(*kills);
+    }
     let result = app.world().resource::<MatchResult>();
     encoder.bool(result.finished);
     match result.winner {
@@ -682,10 +710,15 @@ fn encode_authoritative_state(
                 encoder.f32(*damage)?;
                 encoder.bool(*shielded);
             }
-            StarfighterEvent::Destroyed { player_id, source } => {
+            StarfighterEvent::Destroyed {
+                player_id,
+                source,
+                killer,
+            } => {
                 encoder.u8(3);
                 encoder.u64(*player_id as u64);
                 encoder.string(source);
+                encode_optional_player(&mut encoder, *killer);
             }
             StarfighterEvent::MatchEnded { winner } => {
                 encoder.u8(4);
@@ -784,6 +817,16 @@ fn encode_physics_state(
     Ok(())
 }
 
+fn encode_optional_player(encoder: &mut CanonicalEncoder, value: Option<usize>) {
+    match value {
+        Some(player_id) => {
+            encoder.bool(true);
+            encoder.u64(player_id as u64);
+        }
+        None => encoder.bool(false),
+    }
+}
+
 fn encode_vec2(
     encoder: &mut CanonicalEncoder,
     value: Vec2,
@@ -878,6 +921,93 @@ mod tests {
         }
     }
 
+    fn ffa_spec(players: usize, max_ticks: u64) -> SimulationSpec {
+        let mut spec = spec();
+        spec.slots = (0..players)
+            .map(|i| ExecutionSlotSpec {
+                slot_id: format!("slot-{i}"),
+                artifact_digest: format!("{:064x}", i + 1),
+            })
+            .collect();
+        spec.limits.max_players = players as u32;
+        spec.limits.max_ticks = max_ticks;
+        spec
+    }
+
+    /// F4: una partida de 5 slots corre por el host completo hasta su fin y
+    /// el resultado trae una posición por slot, con puestos de competencia
+    /// válidos y `score` = bajas.
+    #[test]
+    fn five_slot_match_reports_one_placement_per_slot() {
+        let mut registry = GameRegistry::new();
+        registry.register(Arc::new(StarfighterGame::new())).unwrap();
+        let mut host = EngineHost::new(registry);
+        host.initialize(ffa_spec(5, 120)).unwrap();
+        let mut last = None;
+        for tick in 0..120 {
+            let mut actions = ActionBatch::new();
+            for i in 0..5 {
+                actions.insert(
+                    format!("slot-{i}"),
+                    SlotAction {
+                        status: ActionStatus::Valid,
+                        requested: None,
+                        applied: Some(serde_json::json!({
+                            "thrust": "FORWARD",
+                            "turn": if i % 2 == 0 { "LEFT" } else { "NONE" },
+                            "shoot": true,
+                            "shield": false
+                        })),
+                        policy_decision: "apply".to_string(),
+                        error_code: None,
+                    },
+                );
+            }
+            let frame = host.advance(tick, &actions).unwrap();
+            assert_eq!(
+                frame.observations.len() + dead_slots(&frame),
+                5,
+                "cada slot vivo recibe su observación"
+            );
+            let terminal = frame.terminal;
+            last = Some(frame);
+            if terminal {
+                break;
+            }
+        }
+        let frame = last.unwrap();
+        assert!(frame.terminal);
+        let result = frame.result.expect("frame terminal trae resultado");
+        let rankings = result["rankings"].as_array().unwrap();
+        assert_eq!(rankings.len(), 5, "resultado: {result}");
+        let mut slots: Vec<&str> =
+            rankings.iter().map(|r| r["slot"].as_str().unwrap()).collect();
+        slots.sort_unstable();
+        assert_eq!(slots, ["slot-0", "slot-1", "slot-2", "slot-3", "slot-4"]);
+        let ranks: Vec<u64> =
+            rankings.iter().map(|r| r["rank"].as_u64().unwrap()).collect();
+        assert_eq!(ranks[0], 1);
+        assert!(ranks.windows(2).all(|w| w[0] <= w[1]));
+        assert!(rankings.iter().all(|r| r["score"].is_u64()));
+    }
+
+    fn dead_slots(frame: &agentrix_engine_host::HostFrame) -> usize {
+        frame.public_snapshot["fighters"]
+            .as_array()
+            .map(|fighters| 5 - fighters.len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn six_slots_are_rejected() {
+        let mut registry = GameRegistry::new();
+        registry.register(Arc::new(StarfighterGame::new())).unwrap();
+        let mut host = EngineHost::new(registry);
+        let error = host.initialize(ffa_spec(6, 10)).unwrap_err();
+        assert_eq!(error.code, "invalid_player_count");
+        assert!(error.message.contains("2..=5"), "{}", error.message);
+    }
+
     fn run() -> Vec<agentrix_sim_core::StateCommitments> {
         let mut registry = GameRegistry::new();
         registry.register(Arc::new(StarfighterGame::new())).unwrap();
@@ -943,19 +1073,19 @@ mod tests {
         assert_eq!(
             descriptor.schemas.action,
             digest(include_bytes!(
-                "../schemas/games/starfighter/0.3.0-core.1/action.schema.json"
+                "../schemas/games/starfighter/0.4.0/action.schema.json"
             ))
         );
         assert_eq!(
             descriptor.schemas.observation,
             digest(include_bytes!(
-                "../schemas/games/starfighter/0.3.0-core.1/observation.schema.json"
+                "../schemas/games/starfighter/0.4.0/observation.schema.json"
             ))
         );
         assert_eq!(
             descriptor.schemas.public,
             digest(include_bytes!(
-                "../schemas/games/starfighter/0.3.0-core.1/public.schema.json"
+                "../schemas/games/starfighter/0.4.0/public.schema.json"
             ))
         );
     }

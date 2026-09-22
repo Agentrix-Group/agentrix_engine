@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentrix.dev/schemas/games/starfighter/0.4.0/observation.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tick", "player_id", "myself", "rivals", "bullets"],
+  "properties": {
+    "tick": {"type": "integer", "minimum": 0},
+    "player_id": {"type": "integer", "minimum": 0},
+    "myself": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["position", "velocity", "facing", "health", "energy", "shield_active", "remaining_bullet_cooldown"],
+      "properties": {
+        "position": {"$ref": "#/$defs/vector"},
+        "velocity": {"$ref": "#/$defs/vector"},
+        "facing": {"$ref": "#/$defs/vector"},
+        "health": {"type": "number"},
+        "energy": {"type": "number"},
+        "shield_active": {"type": "boolean"},
+        "remaining_bullet_cooldown": {"type": "integer"}
+      }
+    },
+    "rivals": {"type": "array", "items": {"$ref": "#/$defs/rival"}},
+    "bullets": {"type": "array", "items": {"$ref": "#/$defs/bullet"}}
+  },
+  "$defs": {
+    "vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {"x": {"type": "number"}, "y": {"type": "number"}}
+    },
+    "rival": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["player_id", "relative_position", "relative_velocity", "facing", "health", "shield_active"],
+      "properties": {
+        "player_id": {"type": "integer", "minimum": 0},
+        "relative_position": {"$ref": "#/$defs/vector"},
+        "relative_velocity": {"$ref": "#/$defs/vector"},
+        "facing": {"$ref": "#/$defs/vector"},
+        "health": {"type": "number"},
+        "shield_active": {"type": "boolean"}
+      }
+    },
+    "bullet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["player_id", "relative_position", "relative_velocity"],
+      "properties": {
+        "player_id": {"type": "integer", "minimum": 0},
+        "relative_position": {"$ref": "#/$defs/vector"},
+        "relative_velocity": {"$ref": "#/$defs/vector"}
+      }
+    }
+  }
+}

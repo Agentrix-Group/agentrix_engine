@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentrix.dev/schemas/games/starfighter/0.4.0/config.schema.json",
+  "title": "Starfighter Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "arena_width",
+    "arena_height",
+    "ship_max_health",
+    "ship_max_energy",
+    "bullet_damage",
+    "asteroid_damage",
+    "shoot_energy_cost",
+    "shield_energy_cost_per_tick",
+    "shield_damage_reduction",
+    "energy_regen_per_tick",
+    "radar_range",
+    "asteroid_count"
+  ],
+  "properties": {
+    "arena_width": {"type": "number", "exclusiveMinimum": 0.0},
+    "arena_height": {"type": "number", "exclusiveMinimum": 0.0},
+    "ship_max_health": {"type": "number", "exclusiveMinimum": 0.0},
+    "ship_max_energy": {"type": "number", "exclusiveMinimum": 0.0},
+    "bullet_damage": {"type": "number", "minimum": 0.0},
+    "asteroid_damage": {"type": "number", "minimum": 0.0},
+    "shoot_energy_cost": {"type": "number", "minimum": 0.0},
+    "shield_energy_cost_per_tick": {"type": "number", "minimum": 0.0},
+    "shield_damage_reduction": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "energy_regen_per_tick": {"type": "number", "minimum": 0.0},
+    "radar_range": {"type": "number", "exclusiveMinimum": 0.0},
+    "asteroid_count": {"type": "integer", "minimum": 0}
+  }
+}

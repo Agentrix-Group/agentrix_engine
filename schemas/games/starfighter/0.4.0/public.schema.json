@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentrix.dev/schemas/games/starfighter/0.4.0/public.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "tick", "fighters", "bullets", "events"],
+  "properties": {
+    "schemaVersion": {"const": "starfighter-public/1"},
+    "tick": {"type": "integer", "minimum": 0},
+    "fighters": {"type": "array", "items": {"$ref": "#/$defs/fighter"}},
+    "bullets": {"type": "array", "items": {"$ref": "#/$defs/bullet"}},
+    "events": {"type": "array", "items": {"$ref": "#/$defs/event"}}
+  },
+  "$defs": {
+    "vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {"x": {"type": "number"}, "y": {"type": "number"}}
+    },
+    "fighter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entityId", "slot", "position", "velocity", "rotation", "angularVelocity", "health", "shieldActive"],
+      "properties": {
+        "entityId": {"type": "integer", "minimum": 1},
+        "slot": {"type": "string", "minLength": 1},
+        "position": {"$ref": "#/$defs/vector"},
+        "velocity": {"$ref": "#/$defs/vector"},
+        "rotation": {"type": "number"},
+        "angularVelocity": {"type": "number"},
+        "health": {"type": "number"},
+        "shieldActive": {"type": "boolean"}
+      }
+    },
+    "event": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "player_id"],
+          "properties": {"type": {"const": "fired"}, "player_id": {"type": "integer", "minimum": 0}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "player_id", "source", "damage", "shielded"],
+          "properties": {
+            "type": {"const": "hit"},
+            "player_id": {"type": "integer", "minimum": 0},
+            "source": {"type": "string"},
+            "damage": {"type": "number"},
+            "shielded": {"type": "boolean"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "player_id", "source", "killer"],
+          "properties": {
+            "type": {"const": "destroyed"},
+            "player_id": {"type": "integer", "minimum": 0},
+            "source": {"type": "string"},
+            "killer": {"type": ["integer", "null"], "minimum": 0}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "winner"],
+          "properties": {
+            "type": {"const": "match_ended"},
+            "winner": {"type": ["integer", "null"], "minimum": 0}
+          }
+        }
+      ]
+    },
+    "bullet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entityId", "slot", "position", "velocity"],
+      "properties": {
+        "entityId": {"type": "integer", "minimum": 1},
+        "slot": {"type": "string", "minLength": 1},
+        "position": {"$ref": "#/$defs/vector"},
+        "velocity": {"$ref": "#/$defs/vector"}
+      }
+    }
+  }
+}
