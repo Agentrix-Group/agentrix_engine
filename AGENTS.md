@@ -22,8 +22,11 @@ en `docs/index.md`, `docs/decisions/` y `docs/roadmap/current.md`.
 - La semilla y la secuencia de acciones son entradas explícitas.
 - No se afirma determinismo certificado solo porque exista `stateHash`.
 - Starfighter es el único juego actual.
-- Avian2D es la física aceptada para el MVP. Rapier, Gym, sim-core y
-  multi-juego son trabajo posterior en el orden del roadmap principal.
+- La migración de Avian2D a `rapier2d` y a partidas de 2 a 5 jugadores
+  todos contra todos está aprobada por ADR-0013 del repositorio principal y
+  avanza por fases F0–F7 con criterios numéricos. Hasta cerrar F3, Avian2D
+  sigue siendo la física en uso. Gym, sim-core y multi-juego siguen el orden
+  del roadmap principal.
 - El objetivo es 60 Hz exactos. La entrada actual en milisegundos enteros y la
   configuración de 17 ms son una divergencia pendiente; no se deben presentar
   como equivalentes a 60 Hz.

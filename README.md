@@ -70,8 +70,10 @@ es una única autoridad exacta. El adaptador v1 todavía acepta sus campos
 históricos hasta la migración coordinada de protocolo.
 
 El tier certificado por el corpus actual es D1/D2 para el mismo artefacto y
-target Linux x86_64. No se afirma igualdad entre arquitecturas. Gym y la
-evaluación Avian/Rapier siguen fuera de este corte.
+target Linux x86_64. No se afirma igualdad entre arquitecturas. La migración
+a Rapier y a partidas todos contra todos sigue ADR-0013 del repositorio
+principal; la línea base de throughput con Avian está en
+`benches/baseline/avian2d-f0.md`. Gym sigue fuera de este corte.
 
 ## Compilación y pruebas
 
